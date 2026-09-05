@@ -38,6 +38,11 @@ const MS_PER_SECOND = 1_000;
 // Single revert flag for rev-7 incumbent grace: set false to restore pure
 // evict-oldest-on-cap (rev 5) without touching the cap itself.
 const MCP_SESSION_INCUMBENT_GRACE_ENABLED = true;
+// Hotfix pending rev 8 (live-only 2026-09-05): the rev-7 grace compared idle age
+// against the full idle TTL, which wedged at cap under zombie-session floods
+// (oldest idle stuck at 17-30 min -> every new initialize got 503). The grace
+// is a RECENT-ACTIVITY window instead.
+const MCP_SESSION_INCUMBENT_GRACE_MS = 5 * 60 * 1_000; // never evict a session active within this window
 // 503 Retry-After for rejected initializations (seconds).
 const MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS = 60;
 // Bash timeout bounds are single-sourced from pi-tools.js
@@ -47,7 +52,7 @@ const MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS = 60;
 // defaults to 45s; the pi bash tool owns the child process-tree kill.
 // The 30 min idle sweep bounds session age, not count; cap registered sessions.
 // Revert everything cap-related by lowering this one const (rev 4/5/7).
-const MAX_MCP_SESSIONS = 256;
+const MAX_MCP_SESSIONS = 8192;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -1485,10 +1490,11 @@ export function createServer(config = loadConfig(), options = {}) {
             else if (initializeRequest) {
                 // The cap bounds memory, not clients. Rev-7 incumbent grace: a NEW
                 // session must not evict a live incumbent mid-conversation (next call
-                // -> 404 "Unknown MCP session"). If the oldest session is still inside
-                // the idle-timeout window it may be live, so reject the newcomer with
-                // 503 Retry-After instead of evicting. Only an oldest already past the
-                // idle window (same class as the idle sweep) is evicted.
+                // -> 404 "Unknown MCP session"). If the oldest session was active
+                // inside the recent-activity grace window it may be live, so reject
+                // the newcomer with 503 Retry-After instead of evicting. Only an
+                // oldest already past the grace window is evicted. Hotfix pending
+                // rev 8 (2026-09-05): grace was the full idle TTL, which wedged.
                 // Revert: MCP_SESSION_INCUMBENT_GRACE_ENABLED=false restores rev-5
                 // pure evict-oldest; MAX_MCP_SESSIONS remains the single cap const.
                 if (transports.size >= MAX_MCP_SESSIONS) {
@@ -1513,7 +1519,7 @@ export function createServer(config = loadConfig(), options = {}) {
                     }
                     const oldestIdleMs = Date.now() - oldestEntry.lastActivityAt;
                     const idleSeconds = Math.max(0, Math.floor(oldestIdleMs / MS_PER_SECOND));
-                    if (MCP_SESSION_INCUMBENT_GRACE_ENABLED && oldestIdleMs < MCP_SESSION_IDLE_TIMEOUT_MS) {
+                    if (MCP_SESSION_INCUMBENT_GRACE_ENABLED && oldestIdleMs < MCP_SESSION_INCUMBENT_GRACE_MS) {
                         logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
                             requestId,
                             currentSessions: transports.size,
@@ -1526,7 +1532,9 @@ export function createServer(config = loadConfig(), options = {}) {
                         return;
                     }
                     const victimLastActivityAt = oldestEntry.lastActivityAt;
-                    logEvent(config.logging, "info", "mcp_session_evicted", {
+                    // Hotfix pending rev 8 (live-only 2026-09-05): demote per-event
+                    // eviction log to debug; failures stay warn (see below).
+                    logEvent(config.logging, "debug", "mcp_session_evicted", {
                         requestId,
                         evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
                         idleSeconds,
@@ -1643,7 +1651,7 @@ if (await isMainModule()) {
         console.log(`native artifact download: ${artifactDownloadStatus}`);
         console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
         console.log(`bash timeout: default ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}s, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}s`);
-        console.log(`mcp sessions: max ${MAX_MCP_SESSIONS}, idle timeout ${MCP_SESSION_IDLE_TIMEOUT_MS / MS_PER_SECOND}s, limit Retry-After ${MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS}s, incumbent grace ${MCP_SESSION_INCUMBENT_GRACE_ENABLED ? "enabled" : "disabled"}`);
+        console.log(`mcp sessions: max ${MAX_MCP_SESSIONS}, idle timeout ${MCP_SESSION_IDLE_TIMEOUT_MS / MS_PER_SECOND}s, limit Retry-After ${MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS}s, incumbent grace ${MCP_SESSION_INCUMBENT_GRACE_ENABLED ? `${MCP_SESSION_INCUMBENT_GRACE_MS / MS_PER_SECOND}s` : "disabled"}`);
     });
     let shuttingDown = false;
     const shutdown = async () => {

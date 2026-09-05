@@ -19,6 +19,14 @@ import { SUBAGENT_SKILL_INSTALL_COMMAND, resolveOnboardingUsage, updateOnboardin
 import { generateOwnerToken, loadDevspaceFiles, writeDevspaceAuth, writeDevspaceConfig, } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+// Hotfix pending rev 8 (live-only 2026-09-05): import the rev-7 bash timeout
+// consts so the production serve() path logs the effective patched values.
+// pi-tools.js is a leaf (imports roots.js + pi-coding-agent only): no cycle.
+// MCP cap consts are NOT imported — server.js does not export them and a
+// static import would eagerly load the heavy server module (express/MCP,
+// top-level-await side-effect check) for every cli command; their literals are
+// duplicated below with a pointer comment instead.
+import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS } from "./pi-tools.js";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 async function main(argv) {
@@ -239,6 +247,14 @@ async function serve() {
         console.log("auth: Owner password approval required");
         console.log(`logging: ${config.logging.level} ${config.logging.format}`);
         console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
+        console.log(`bash timeout: default ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}s, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}s`);
+        // Hotfix pending rev 8: literals mirror server.js consts
+        // (MAX_MCP_SESSIONS=8192, MCP_SESSION_IDLE_TIMEOUT_MS/MS_PER_SECOND=1800s,
+        // MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS=60s,
+        // MCP_SESSION_INCUMBENT_GRACE_MS/MS_PER_SECOND=300s,
+        // MCP_SESSION_INCUMBENT_GRACE_ENABLED=true). Same format as the
+        // server.js isMainModule path.
+        console.log(`mcp sessions: max 8192, idle timeout 1800s, limit Retry-After 60s, incumbent grace 300s`);
     });
     let shuttingDown = false;
     const shutdown = async () => {

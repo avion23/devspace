@@ -82,3 +82,184 @@ Each entry: file, what, why, backup, revert.
   - Lockfile/WARNING: `git show v1.0.8-r6:package.json` `files` (drop `package-lock.json`) + delete `package-lock.json`; README WARNING previous single-line form is in `git show v1.0.8-r6:README.md`.
   - Aliases: delete the marker `app.use` block in `dist/server.js` (or run no reapply script on next install).
 - Applied by: agent session 2026-09-05; validated with `node --check dist/server.js dist/pi-tools.js`, a `node --test` script under `/tmp` (13 tests: const values 45/900, executor semantics incl. 500 passthrough, zod 901-rejected/900-accepted + describe text, startup-log presence, magic-number naming, grace/503-live/re-validation/logged-catch assertions, adversarial arrival-order selection incl. boundary), and `git diff` review (minimal, no dead code, no new per-admission info logs).
+
+## 2026-09-05 (rev 8) — hotfix released 2026-09-05 as `v1.0.8-r8` (300 s default timeout, 300 s incumbent grace, 8192-session cap, quiet eviction logs, read-guard error shape, production startup logs)
+
+- Released: tag `v1.0.8-r8`, 2026-09-05. Rev 8 = `v1.0.8-r7` + (a) + (b1) + (b2)
+  + (c) + (d) + (e) below, byte-identical to the previously live hotfix
+  (verified by md5 before and after the tagged install on BOTH hosts). Revert =
+  reinstall the previous tag:
+  `npm i -g https://github.com/avion23/devspace/archive/refs/tags/v1.0.8-r7.tar.gz`
+  + restart (`sudo -n systemctl restart devspace` netcup /
+  `XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart devspace-serve`
+  instance2).
+- Date: 2026-09-05. Applied identically on BOTH hosts (netcup
+  `~/.local/npm-global/.../@waishnav/devspace/dist/`, instance2 same path;
+  host-vs-host `diff` clean on all three files).
+- Base: `v1.0.8-r7` tag tree — tag-tree md5s were byte-identical to live BEFORE
+  patching (`cli.js 2182a6fecedbc769e34f717559cf01c0`,
+  `server.js 33978ab1c45c97d44b63a769b934afc6`,
+  `pi-tools.js 8c3e3ec9a5039245004ace8331f53cf0`,
+  `roots.js 8ea6bda1f4da8295c83805f11e5cb03d`). `dist/roots.js` untouched.
+- Change (a) production startup logs (`dist/cli.js`): imports rev-7
+  `BASH_TOOL_DEFAULT_TIMEOUT_SECONDS`/`BASH_TOOL_MAX_TIMEOUT_SECONDS` from
+  `./pi-tools.js` (leaf module, no cycle) and logs
+  `bash timeout: default 45s, max 900s` in `serve()`; MCP cap values duplicated
+  as literals with pointer comment (`mcp sessions: max 256, idle timeout 1800s,
+  limit Retry-After 60s, incumbent grace enabled`) because `server.js` does not
+  export those consts and statically importing `server.js` would eagerly load
+  the heavy server module for every cli command. Same format as the
+  `server.js` isMainModule path.
+- Change (b1/F10) quiet per-event logging (`dist/server.js` only):
+  `mcp_session_evicted` `info` → `debug`. `mcp_session_evict_skipped` already
+  `debug`; `mcp_session_evict_close_failed` stays `warn`. Pre-existing upstream
+  lines (`mcp_session_created`, `mcp_request`, `http_request`) untouched.
+- Change (b2/F11) read-guard (`dist/pi-tools.js` `readFileTool`): `statSync`
+  inside try/catch returning `{ content: formatToolError(error), isError: true }`
+  (same shape as the `runTool` catch) so missing files return upstream `isError`
+  instead of MCP `-32603`; `!stats.isFile()` rejects non-regular files
+  (directories, FIFOs, sockets, size-0 specials) with a clean client-facing
+  `isError` before reading. 5 MB guard semantics unchanged. Residual TOCTOU
+  (size-check-then-read race) intentionally stays — see `pending-rev8/NOTES.md`.
+- New md5s (BOTH hosts, identical): `cli.js 646524b6be6f3ee464a80e289e902621`,
+  `server.js 10d1271d3c131a5b429041cb74b1c3d8`,
+  `pi-tools.js 6213176af614a0e9c18f6e43ad020062`.
+- Backups: `~/.devspace/baks/{cli,server,pi-tools}.js-hotfix-20260905` (pre-hotfix
+  = `v1.0.8-r7` state) on BOTH hosts.
+- Revert: reinstall the `v1.0.8-r7` tarball + restart (`sudo systemctl restart
+  devspace` on netcup / `XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user
+  restart devspace-serve` on instance2).
+- Evidence: `node --check` clean on all three files both hosts; throwaway local
+  `serve` + OAuth + MCP round-trip `tools/list` shows bash `timeout`
+  `{ "description": "Timeout in seconds. Defaults to 45, max 900.", "maximum": 900 }`;
+  `readFileTool` probe (missing → ENOENT `isError`, dir → not-regular-file
+  `isError`, small file → success); both services restarted post-mtime with
+  healthz 200 and the new `bash timeout:` / `mcp sessions:` lines in the
+  production journals.
+- Rev-8 source: `/home/admin/.devspace/pending-rev8/` (`hotfix.diff` =
+  `git diff v1.0.8-r7 -- dist/` over scratch clone `/tmp/ds-r8`, plus NOTES.md).
+- Addendum 2026-09-05 (bash default timeout 45→300):
+  `dist/pi-tools.js:9` `BASH_TOOL_DEFAULT_TIMEOUT_SECONDS` 45 → 300 (one const,
+  single source; `dist/server.js` schema describe + kill message and
+  `dist/cli.js` startup log import it so all user-facing strings update
+  automatically). Rationale: operator-approved; clients omitting `timeout` were
+  killed at 45s. `BASH_TOOL_MAX_TIMEOUT_SECONDS`, the 900 schema max, and the
+  incumbent-grace logic untouched. Stale-`45` grep over both live trees: no
+  user-facing `45` remains (only residual `server.js:47` code comment
+  `defaults to 45s`, intentionally untouched). New md5s (BOTH hosts, identical):
+  `pi-tools.js 23639cc13ed22becf0969e025d4ebbe1`,
+  `server.js 10d1271d3c131a5b429041cb74b1c3d8` (unchanged),
+  `cli.js 646524b6be6f3ee464a80e289e902621` (unchanged); host-vs-host diff
+  clean. Backups: `~/.devspace/baks/pi-tools.js-hotfix2-20260905` (pre-change
+  45s state) on BOTH hosts. Revert: same procedure —
+  `cp ~/.devspace/baks/pi-tools.js-hotfix2-20260905` over live `dist/pi-tools.js`
+  + restart (`sudo -n systemctl restart devspace` netcup /
+  `XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart devspace-serve`
+  instance2), or reinstall the `v1.0.8-r7` tarball (reverts whole rev-8 hotfix).
+  Evidence: `node --check` clean both hosts; throwaway `serve` + OAuth +
+  `tools/list` shows `Timeout in seconds. Defaults to 300, max 900.` with
+  `maximum: 900` on BOTH hosts; production journals show
+  `bash timeout: default 300s, max 900s`; `pending-rev8/hotfix.diff` regenerated
+  to include (a)/(b1)/(b2)+(c).
+- Addendum 2026-09-05 (incumbent grace 30min→300s):
+  `dist/server.js` eviction-block grace check at cap compared the oldest
+  session's idle ms against the FULL idle TTL
+  (`oldestIdleMs < MCP_SESSION_IDLE_TIMEOUT_MS`, 30 min). Defect (proven): under
+  this client's zombie-session flood (~5-14 new sessions/min, never closed), at
+  cap the oldest session is always 17-30 min idle → permanently "just inside"
+  the grace → every new initialize got 503
+  (`mcp_session_limit_rejected … currentSessions:256, idleSeconds:1794`,
+  Retry-After 60) — total admission wedge (pre-fix journal lines show
+  `idleSeconds:1791/1792` pinned under the 1800 s TTL). Fix: new module-scope
+  const `MCP_SESSION_INCUMBENT_GRACE_MS = 5 * 60 * 1_000` (300 s
+  RECENT-ACTIVITY window: never evict a session active within this window);
+  the at-cap decision now compares against it — oldest idle > 300 s →
+  evict-oldest + admit (same zombie class as the idle sweep), oldest active
+  within 300 s → 503 Retry-After (live incumbent protected). Reject and evict
+  paths unchanged; ONLY the threshold const is new. `dist/cli.js` startup
+  literal → `incumbent grace 300s`; `dist/server.js` startup line renders the
+  const. MAX 256, default 300, idle sweep 30 min, Retry-After 60 untouched.
+  Evidence: scratch decision check over the real patched block (cap full):
+  1794 s → EVICT/admit (was: reject), 200 s → REJECT 503, 299 s → REJECT 503,
+  301 s → EVICT, below-cap → ADMIT (all PASS). New md5s (BOTH hosts, identical):
+  `server.js c91cd3d5ce3488602a178d042a679693`,
+  `cli.js a8f56a251c5cd4be867a11b27609cdc3`, `pi-tools.js` unchanged
+  (`23639cc13ed22becf0969e025d4ebbe1`); host-vs-host diff clean. Backups:
+  `~/.devspace/baks/{server,cli}.js-hotfix3-20260905` (pre-grace-fix state) on
+  BOTH hosts. Restarts approved: netcup 21:18:04 CEST, instance2 19:17:47 UTC;
+  both startup lines `mcp sessions: max 256, idle timeout 1800s, limit
+  Retry-After 60s, incumbent grace 300s`; service starts newer than file
+  mtimes; healthz 200 (netcup local + https://nety3.duckdns.org/healthz,
+  instance2 local). Post-restart 10-min window (netcup 21:18:04→21:28:38 CEST,
+  instance2 19:17:47→19:28:38 CEST): `mcp_session_limit_rejected` = 0 on BOTH
+  hosts; `mcp_session_created` = 41 (netcup) / 1 (instance2) — new sessions
+  admitted again. Revert: `cp ~/.devspace/baks/server.js-hotfix3-20260905
+  ~/.devspace/baks/cli.js-hotfix3-20260905` over live `dist/` + restart (same
+  per-host restart commands), or reinstall the `v1.0.8-r7` tarball (reverts the
+  whole rev-8 hotfix). `pending-rev8/hotfix.diff` regenerated to include
+  (a)/(b1)/(b2)+(c)+(d); `pending-rev8/NOTES.md` has the full Change (d)
+  section.
+- Addendum 2026-09-05 (MCP session cap 256→2048):
+  `dist/server.js` module-scope const `MAX_MCP_SESSIONS` 256 → 2048 (one const;
+  at-cap comparisons, 503 body `limit`, and the `isMainModule` startup line all
+  render it). `dist/cli.js` startup literal → `max 2048` (pointer comment
+  mirrored). Idle timeout 30 min, incumbent grace 300 s, Retry-After 60, bash
+  timeout 300/900 untouched. Rationale: operator-approved capacity headroom;
+  after the (d) grace fix the cap is a backstop again, not a gate; ~440
+  steady-state sessions at current churn; ~50-100 KB/session → ≤200 MB worst
+  case. New md5s (BOTH hosts, identical):
+  `server.js f0f4d87d1402a0b9fe8121b7c72132a4`,
+  `cli.js f7863125a1ea7c4dfad4b59fe133f12c`, `pi-tools.js` unchanged
+  (`23639cc13ed22becf0969e025d4ebbe1`); host-vs-host diff clean. Backups:
+  `~/.devspace/baks/{server,cli}.js-hotfix4-20260905` (pre-cap state = the (d)
+  md5s) on BOTH hosts. Restarts approved: netcup 21:32:47 CEST, instance2
+  19:32:50 UTC; both startup lines `mcp sessions: max 2048, idle timeout 1800s,
+  limit Retry-After 60s, incumbent grace 300s`; service starts newer than file
+  mtimes; healthz 200 (netcup local + https://nety3.duckdns.org/healthz,
+  instance2 local). Post-restart 10-min window (netcup 21:32:47→21:43:14 CEST,
+  instance2 19:32:50→19:43:14 UTC): `mcp_session_limit_rejected` = 0 on BOTH
+  hosts; `mcp_session_created` = 128 (netcup) / 17 (instance2); node RSS
+  169176 KB (netcup) / 160760 KB (instance2). Revert:
+  `cp ~/.devspace/baks/server.js-hotfix4-20260905
+  ~/.devspace/baks/cli.js-hotfix4-20260905` over live `dist/` + restart (same
+  per-host restart commands), or reinstall the `v1.0.8-r7` tarball (reverts the
+  whole rev-8 hotfix). `pending-rev8/hotfix.diff` regenerated to include
+  (a)/(b1)/(b2)+(c)+(d)+(e); `pending-rev8/NOTES.md` has the full Change (e)
+  section.
+- Addendum 2026-09-05 (MCP session cap 2048→8192;
+  supersedes the 256→2048 addendum above — 2048 was live ~15 min
+  (netcup 21:32:47→21:47:59 CEST) and was raised the same day):
+  `dist/server.js` module-scope const `MAX_MCP_SESSIONS` 2048 → 8192 (one const;
+  at-cap comparisons, 503 body `limit`, and the `isMainModule` startup line all
+  render it). `dist/cli.js` startup literal → `max 8192` (pointer comment
+  mirrored: `MAX_MCP_SESSIONS=8192`). Idle timeout 30 min, incumbent grace
+  300 s, Retry-After 60, bash timeout 300/900 untouched. Rationale:
+  operator-approved capacity headroom; after the (d) grace fix the cap is a
+  backstop, and the 30-min idle sweep still bounds the real count to churn ×
+  30 min; ~50-100 KB/session → 0.4-0.8 GB anon worst case at 8192, explicitly
+  accepted by the operator. New md5s (BOTH hosts, identical):
+  `server.js 0659389c16da8d7445b5f5a78cdde4b7`,
+  `cli.js 9f9546c1436a25f8fc0be523002287b5`, `pi-tools.js` unchanged
+  (`23639cc13ed22becf0969e025d4ebbe1`); host-vs-host diff clean. Backups:
+  `~/.devspace/baks/{server,cli}.js-hotfix5-20260905` (pre-8192 state = the
+  2048 md5s f0f4d87d…/f7863125… above) on BOTH hosts; `*-hotfix4-20260905`
+  still hold the pre-2048 (d) state. Restarts approved: netcup 21:47:59 CEST,
+  instance2 19:47:56 UTC; both startup lines `mcp sessions: max 8192, idle
+  timeout 1800s, limit Retry-After 60s, incumbent grace 300s` + `bash timeout:
+  default 300s, max 900s`; service starts newer than file mtimes (netcup
+  21:47:59 > 21:47:20-22; instance2 19:47:56 > 19:47:33) and disk grep
+  `MAX_MCP_SESSIONS = 8192` = 1 on both; PIDs unchanged through the window;
+  healthz 200 (netcup local + https://nety3.duckdns.org/healthz, instance2
+  local). Post-restart 10-min window (netcup 21:47:59→21:58:28 CEST, instance2
+  19:47:56→19:58:28 UTC): `mcp_session_limit_rejected` = 0 on BOTH hosts;
+  `mcp_session_created` = 240 (netcup) / 37 (instance2); node RSS 186432 KB
+  (netcup) / 159700 KB (instance2). `pending-rev8/hotfix.diff` regenerated
+  (supersedes the 2048 hunks — diff shows 8192, no residual 2048 additions;
+  reproducibility: clean `v1.0.8-r7` worktree + `git apply` → byte-identical
+  to live on `server.js`/`cli.js`/`pi-tools.js`/`roots.js`, `node --check`
+  clean). `pending-rev8/NOTES.md` Change (e) updated to 8192. Revert (8192
+  step only, back to 2048): `cp ~/.devspace/baks/server.js-hotfix5-20260905
+  ~/.devspace/baks/cli.js-hotfix5-20260905` over live `dist/` + restart (same
+  per-host restart commands). Full (e) revert (back to 256): use the
+  `*-hotfix4-20260905` backups the same way. Reinstalling the `v1.0.8-r7`
+  tarball reverts the whole rev-8 hotfix.

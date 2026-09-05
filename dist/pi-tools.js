@@ -6,7 +6,7 @@ const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
 // imports these consts, so schema and executor cannot drift (rev 6 split-brain:
 // schema max 900 vs executor clamp 300). Out-of-range explicit values are
 // rejected by the schema; the Math.min below is defense-in-depth only.
-export const BASH_TOOL_DEFAULT_TIMEOUT_SECONDS = 45;
+export const BASH_TOOL_DEFAULT_TIMEOUT_SECONDS = 300;
 export const BASH_TOOL_MAX_TIMEOUT_SECONDS = 900;
 function formatReadLimitError(path, sizeBytes) {
     const groupedBytes = String(sizeBytes).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -43,7 +43,23 @@ async function runTool(execute, input, context) {
 }
 export async function readFileTool(input, context) {
     const path = resolveAllowedPath(input.path, context.cwd, context.readRoots ?? [context.root]);
-    const stats = statSync(path);
+    // Hotfix pending rev 8 (live-only 2026-09-05): stat inside try so missing
+    // files return the upstream isError shape (via formatToolError) instead of
+    // throwing MCP -32603; reject non-regular files before reading. Residual
+    // TOCTOU (size-check-then-read race) intentionally stays — see PATCHES.md.
+    let stats;
+    try {
+        stats = statSync(path);
+    }
+    catch (error) {
+        return { content: formatToolError(error), isError: true };
+    }
+    if (!stats.isFile()) {
+        return {
+            content: [{ type: "text", text: `${path} is not a regular file (directories, FIFOs, sockets, and size-0 special files cannot be read with this tool).` }],
+            isError: true,
+        };
+    }
     if (stats.size > MAX_READ_FILE_BYTES) {
         return {
             content: [{ type: "text", text: formatReadLimitError(path, stats.size) }],
