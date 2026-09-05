@@ -17,7 +17,7 @@ import { isArtifactDownloadSupportedPlatform, registerArtifactTools, } from "./a
 import { loadConfig } from "./config.js";
 import { createOpenAIIncomingArtifactAdapter, } from "./incoming-artifacts.js";
 import { logEvent, requestIp, requestPath, commandPreview, sessionIdPrefix, } from "./logger.js";
-import { editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, readFileTool, runShellTool, writeFileTool, } from "./pi-tools.js";
+import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS, editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, readFileTool, runShellTool, writeFileTool, } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { McpSessionRegistry, } from "./mcp-sessions.js";
 import { ProcessSessionManager } from "./process-sessions.js";
@@ -33,11 +33,20 @@ import { buildLocalAgentCatalog, buildLocalAgentProviderStatuses, formatLocalAge
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
 const MCP_SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
-// ChatGPT's connector client abandons tool calls around 60s, so an unbounded bash
-// call outlives its client. Default an omitted bash `timeout` to 45s; the pi bash
-// tool owns the child process-tree kill and returns captured output on timeout.
-const BASH_TOOL_DEFAULT_TIMEOUT_SECONDS = 45;
+// Milliseconds per second for idle-age conversions.
+const MS_PER_SECOND = 1_000;
+// Single revert flag for rev-7 incumbent grace: set false to restore pure
+// evict-oldest-on-cap (rev 5) without touching the cap itself.
+const MCP_SESSION_INCUMBENT_GRACE_ENABLED = true;
+// 503 Retry-After for rejected initializations (seconds).
+const MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS = 60;
+// Bash timeout bounds are single-sourced from pi-tools.js
+// (BASH_TOOL_DEFAULT_TIMEOUT_SECONDS / BASH_TOOL_MAX_TIMEOUT_SECONDS):
+// the zod schema below and the executor both use those consts. ChatGPT's
+// connector client abandons tool calls around 60s, so an omitted `timeout`
+// defaults to 45s; the pi bash tool owns the child process-tree kill.
 // The 30 min idle sweep bounds session age, not count; cap registered sessions.
+// Revert everything cap-related by lowering this one const (rev 4/5/7).
 const MAX_MCP_SESSIONS = 256;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
@@ -219,7 +228,7 @@ function appendShellTimeoutGuidance(content) {
     for (const item of content) {
         if (item.type === "text" && item.text.includes("Command timed out after")) {
             item.text +=
-                "\n\nThe command was killed by the bash tool timeout (45 seconds when the caller omits `timeout`). To run longer work, either split it into shorter commands, or re-run passing an explicit `timeout` in seconds (max 900) and wait for the result.";
+                `\n\nThe command was killed by the bash tool timeout (${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS} seconds when the caller omits \`timeout\`). To run longer work, either split it into shorter commands, or re-run passing an explicit \`timeout\` in seconds (max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}) and wait for the result.`;
             return;
         }
     }
@@ -1245,9 +1254,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 timeout: z
                     .number()
                     .positive()
-                    .max(900)
+                    .max(BASH_TOOL_MAX_TIMEOUT_SECONDS)
                     .optional()
-                    .describe("Timeout in seconds. Defaults to 45, max 900."),
+                    .describe(`Timeout in seconds. Defaults to ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}.`),
             },
             outputSchema: resultOutputSchema(),
             ...toolWidgetDescriptorMeta(config, "shell"),
@@ -1474,8 +1483,14 @@ export function createServer(config = loadConfig(), options = {}) {
                 }
             }
             else if (initializeRequest) {
-                // The cap bounds memory, not clients: evicting the oldest-idle zombie session
-                // (same class as the idle sweep) never blocks the live client.
+                // The cap bounds memory, not clients. Rev-7 incumbent grace: a NEW
+                // session must not evict a live incumbent mid-conversation (next call
+                // -> 404 "Unknown MCP session"). If the oldest session is still inside
+                // the idle-timeout window it may be live, so reject the newcomer with
+                // 503 Retry-After instead of evicting. Only an oldest already past the
+                // idle window (same class as the idle sweep) is evicted.
+                // Revert: MCP_SESSION_INCUMBENT_GRACE_ENABLED=false restores rev-5
+                // pure evict-oldest; MAX_MCP_SESSIONS remains the single cap const.
                 if (transports.size >= MAX_MCP_SESSIONS) {
                     let oldestKey;
                     let oldestEntry;
@@ -1485,35 +1500,64 @@ export function createServer(config = loadConfig(), options = {}) {
                             oldestEntry = entry;
                         }
                     }
-                    if (oldestKey && oldestEntry) {
-                        const idleSeconds = Math.max(0, Math.floor((Date.now() - oldestEntry.lastActivityAt) / 1000));
-                        logEvent(config.logging, "info", "mcp_session_evicted", {
-                            requestId,
-                            evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
-                            idleSeconds,
-                            currentSessions: transports.size,
-                            limit: MAX_MCP_SESSIONS,
-                            ...requestLogFields(req, config),
-                        });
-                        try {
-                            await oldestEntry.transport.close();
-                        }
-                        catch {
-                            // Close failure must not wedge the registry at cap.
-                        }
-                        // onclose may already have removed it; delete is a no-op then.
-                        transports.remove(oldestKey);
-                    }
-                    else {
+                    if (!oldestKey || !oldestEntry) {
                         logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
                             requestId,
                             currentSessions: transports.size,
                             limit: MAX_MCP_SESSIONS,
                             ...requestLogFields(req, config),
                         });
-                        res.setHeader("Retry-After", "60");
+                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
                         sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
                         return;
+                    }
+                    const oldestIdleMs = Date.now() - oldestEntry.lastActivityAt;
+                    const idleSeconds = Math.max(0, Math.floor(oldestIdleMs / MS_PER_SECOND));
+                    if (MCP_SESSION_INCUMBENT_GRACE_ENABLED && oldestIdleMs < MCP_SESSION_IDLE_TIMEOUT_MS) {
+                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
+                            requestId,
+                            currentSessions: transports.size,
+                            limit: MAX_MCP_SESSIONS,
+                            idleSeconds,
+                            ...requestLogFields(req, config),
+                        });
+                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
+                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
+                        return;
+                    }
+                    const victimLastActivityAt = oldestEntry.lastActivityAt;
+                    logEvent(config.logging, "info", "mcp_session_evicted", {
+                        requestId,
+                        evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
+                        idleSeconds,
+                        currentSessions: transports.size,
+                        limit: MAX_MCP_SESSIONS,
+                        ...requestLogFields(req, config),
+                    });
+                    try {
+                        await oldestEntry.transport.close();
+                    }
+                    catch (error) {
+                        logEvent(config.logging, "warn", "mcp_session_evict_close_failed", {
+                            requestId,
+                            evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
+                            idleSeconds,
+                            error: error instanceof Error ? error.message : String(error),
+                        });
+                    }
+                    // Re-validate: the victim may have become active during the close
+                    // await (transports.get refreshes lastActivityAt). Skip removal then.
+                    const currentVictim = transports.sessions.get(oldestKey);
+                    if (currentVictim && currentVictim.lastActivityAt !== victimLastActivityAt) {
+                        logEvent(config.logging, "debug", "mcp_session_evict_skipped", {
+                            requestId,
+                            evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
+                            idleSeconds,
+                        });
+                    }
+                    else {
+                        // onclose may already have removed it; delete is a no-op then.
+                        transports.remove(oldestKey);
                     }
                 }
                 transport = new StreamableHTTPServerTransport({
@@ -1598,6 +1642,8 @@ if (await isMainModule()) {
                 : `unsupported on ${process.platform}`;
         console.log(`native artifact download: ${artifactDownloadStatus}`);
         console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
+        console.log(`bash timeout: default ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}s, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}s`);
+        console.log(`mcp sessions: max ${MAX_MCP_SESSIONS}, idle timeout ${MCP_SESSION_IDLE_TIMEOUT_MS / MS_PER_SECOND}s, limit Retry-After ${MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS}s, incumbent grace ${MCP_SESSION_INCUMBENT_GRACE_ENABLED ? "enabled" : "disabled"}`);
     });
     let shuttingDown = false;
     const shutdown = async () => {

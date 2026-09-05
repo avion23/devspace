@@ -17,7 +17,8 @@
     "examples",
     "scripts",
     "skills",
-    "README.md"
+    "README.md",
+    "package-lock.json"
   ],
   "publishConfig": {
     "access": "public"

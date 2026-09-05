@@ -2,6 +2,12 @@ import { statSync } from "node:fs";
 import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, } from "@earendil-works/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
 const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
+// Single source for bash timeout bounds (seconds): the MCP schema in server.js
+// imports these consts, so schema and executor cannot drift (rev 6 split-brain:
+// schema max 900 vs executor clamp 300). Out-of-range explicit values are
+// rejected by the schema; the Math.min below is defense-in-depth only.
+export const BASH_TOOL_DEFAULT_TIMEOUT_SECONDS = 45;
+export const BASH_TOOL_MAX_TIMEOUT_SECONDS = 900;
 function formatReadLimitError(path, sizeBytes) {
     const groupedBytes = String(sizeBytes).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
     const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(1);
@@ -87,7 +93,7 @@ export async function listDirectoryTool(input, context) {
 }
 export async function runShellTool(input, context) {
     const tool = createBashTool(context.cwd);
-    const timeout = input.timeout === undefined ? 30 : Math.min(input.timeout, 300);
+    const timeout = input.timeout === undefined ? BASH_TOOL_DEFAULT_TIMEOUT_SECONDS : Math.min(input.timeout, BASH_TOOL_MAX_TIMEOUT_SECONDS);
     return runTool((params) => tool.execute("run_shell", params), {
         command: input.command,
         timeout,
