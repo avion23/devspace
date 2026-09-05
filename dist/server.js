@@ -31,8 +31,14 @@ import { getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availa
 import { buildLocalAgentCatalog, buildLocalAgentProviderStatuses, formatLocalAgentProviderStatusSummary, } from "./local-agent-catalog.js";
 // MCP clients can reconnect without closing the previous transport. Bound stale
 // session retention so abandoned MCP servers do not accumulate for the life of the process.
-const MCP_SESSION_IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
+const MCP_SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
 const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
+// ChatGPT's connector client abandons tool calls around 60s, so an unbounded bash
+// call outlives its client. Default an omitted bash `timeout` to 45s; the pi bash
+// tool owns the child process-tree kill and returns captured output on timeout.
+const BASH_TOOL_DEFAULT_TIMEOUT_SECONDS = 45;
+// The 30 min idle sweep bounds session age, not count; cap registered sessions.
+const MAX_MCP_SESSIONS = 256;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -208,6 +214,15 @@ function logFailedToolResponse(config, fields, content, startedAt) {
         durationMs: Math.round(performance.now() - startedAt),
         error: toolErrorPreview(content),
     });
+}
+function appendShellTimeoutGuidance(content) {
+    for (const item of content) {
+        if (item.type === "text" && item.text.includes("Command timed out after")) {
+            item.text +=
+                "\n\nThe command was killed by the bash tool timeout (45 seconds when the caller omits `timeout`). To run longer work, either split it into shorter commands, or re-run passing an explicit `timeout` in seconds (max 900) and wait for the result.";
+            return;
+        }
+    }
 }
 function textBlock(text) {
     return { type: "text", text };
@@ -1230,9 +1245,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 timeout: z
                     .number()
                     .positive()
-                    .max(300)
+                    .max(900)
                     .optional()
-                    .describe("Timeout in seconds. Defaults to 30, max 300."),
+                    .describe("Timeout in seconds. Defaults to 45, max 900."),
             },
             outputSchema: resultOutputSchema(),
             ...toolWidgetDescriptorMeta(config, "shell"),
@@ -1241,11 +1256,18 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
             const startedAt = performance.now();
             const workspace = workspaces.getWorkspace(workspaceId);
             const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
-            const response = await runShellTool(input, {
+            // Hard default: an omitted `timeout` must not let a bash call run unbounded
+            // past its client. Explicit caller values (including larger ones) still win;
+            // the pi bash tool owns the actual child process-tree kill.
+            const bashInput = input.timeout === undefined
+                ? { ...input, timeout: BASH_TOOL_DEFAULT_TIMEOUT_SECONDS }
+                : input;
+            const response = await runShellTool(bashInput, {
                 cwd,
                 root: workspace.root,
             });
             if (response.isError) {
+                appendShellTimeoutGuidance(response.content);
                 logFailedToolResponse(config, {
                     tool: toolNames.shell,
                     workspaceId,
@@ -1371,6 +1393,24 @@ export function createServer(config = loadConfig(), options = {}) {
         });
         next();
     });
+    // Local patch (not upstream): ChatGPT strict-discovery GET aliases.
+    // Bare PRM serves the identical doc as PRM/mcp; AS/mcp serves the
+    // identical doc as bare AS. Pure GET req.url rewrite before the SDK auth
+    // router, so canonical metadataHandler serves both (identical body,
+    // content-type, CORS, query passthrough). No auth/token/funnel change.
+    // Upgrade-clobber risk: npm upgrade overwrites dist/server.js; reapply
+    // via ~/.devspace/reapply-wellknown-aliases.sh. See router.js:96-99
+    // (mcpAuthMetadataRouter serves only path-specific PRM + bare AS).
+    app.use((req, _res, next) => {
+        if (req.method !== "GET")
+            return next();
+        const q = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+        if (req.path === "/.well-known/oauth-protected-resource")
+            req.url = "/.well-known/oauth-protected-resource/mcp" + q;
+        else if (req.path === "/.well-known/oauth-authorization-server/mcp")
+            req.url = "/.well-known/oauth-authorization-server" + q;
+        next();
+    });
     app.use(mcpAuthRouter({
         provider: oauthProvider,
         issuerUrl: new URL(config.publicBaseUrl),
@@ -1434,6 +1474,48 @@ export function createServer(config = loadConfig(), options = {}) {
                 }
             }
             else if (initializeRequest) {
+                // The cap bounds memory, not clients: evicting the oldest-idle zombie session
+                // (same class as the idle sweep) never blocks the live client.
+                if (transports.size >= MAX_MCP_SESSIONS) {
+                    let oldestKey;
+                    let oldestEntry;
+                    for (const [sessionId, entry] of transports.sessions) {
+                        if (!oldestEntry || entry.lastActivityAt < oldestEntry.lastActivityAt) {
+                            oldestKey = sessionId;
+                            oldestEntry = entry;
+                        }
+                    }
+                    if (oldestKey && oldestEntry) {
+                        const idleSeconds = Math.max(0, Math.floor((Date.now() - oldestEntry.lastActivityAt) / 1000));
+                        logEvent(config.logging, "info", "mcp_session_evicted", {
+                            requestId,
+                            evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
+                            idleSeconds,
+                            currentSessions: transports.size,
+                            limit: MAX_MCP_SESSIONS,
+                            ...requestLogFields(req, config),
+                        });
+                        try {
+                            await oldestEntry.transport.close();
+                        }
+                        catch {
+                            // Close failure must not wedge the registry at cap.
+                        }
+                        // onclose may already have removed it; delete is a no-op then.
+                        transports.remove(oldestKey);
+                    }
+                    else {
+                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
+                            requestId,
+                            currentSessions: transports.size,
+                            limit: MAX_MCP_SESSIONS,
+                            ...requestLogFields(req, config),
+                        });
+                        res.setHeader("Retry-After", "60");
+                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
+                        return;
+                    }
+                }
                 transport = new StreamableHTTPServerTransport({
                     sessionIdGenerator: () => randomUUID(),
                     onsessioninitialized: (newSessionId) => {

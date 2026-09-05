@@ -32,6 +32,6 @@ export function assertAllowedPath(path, allowedRoots) {
     throw new AccessDeniedError(`Path is outside allowed roots: ${path}`);
 }
 export function resolveAllowedPath(inputPath, cwd, allowedRoots) {
-    const absolutePath = resolve(cwd, inputPath);
+    const absolutePath = resolve(cwd, expandHomePath(inputPath));
     return assertAllowedPath(absolutePath, allowedRoots);
 }

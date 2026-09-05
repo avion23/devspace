@@ -1,5 +1,12 @@
+import { statSync } from "node:fs";
 import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, } from "@earendil-works/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
+const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
+function formatReadLimitError(path, sizeBytes) {
+    const groupedBytes = String(sizeBytes).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(1);
+    return `${path} (${groupedBytes} bytes, ${sizeMb} MB) exceeds the 5 MB read limit for LLM ingestion. Use the bash tool instead: \`tail -n N ${path}\`, \`head -c N ${path}\`, or \`rg --max-count PATTERN ${path}\` to pull the relevant slice.`;
+}
 function toMcpContent(result) {
     return result.content.map((content) => {
         if (content.type === "text") {
@@ -30,6 +37,13 @@ async function runTool(execute, input, context) {
 }
 export async function readFileTool(input, context) {
     const path = resolveAllowedPath(input.path, context.cwd, context.readRoots ?? [context.root]);
+    const stats = statSync(path);
+    if (stats.size > MAX_READ_FILE_BYTES) {
+        return {
+            content: [{ type: "text", text: formatReadLimitError(path, stats.size) }],
+            isError: true,
+        };
+    }
     const tool = createReadTool(context.cwd);
     return runTool((params) => tool.execute("read_file", params), {
         path,
