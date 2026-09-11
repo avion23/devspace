@@ -290,3 +290,7 @@ Each entry: file, what, why, backup, revert.
   6. delete/move/repo_status no longer advertise the workspace widget (responses carry no card; the app rejected them with "No result card is available").
 - Review artifacts: adversarial review by astra subagent (blocker + 2 major + 4 minor, all reproduced with proofs; claims a/b/c/f falsified, d/e partly true). All 6 code findings fixed in this rev; review's regression checks encoded in `behavior-tests/rev10-conformance.mjs` (17/17 pass).
 - Backups: revert = reinstall `v1.0.8-r9` tag; `behavior-tests/` is additive.
+
+## 2026-09-11 (rev 10 hotfix) — `_meta: {}` required by ext-apps registerAppTool
+
+- `@modelcontextprotocol/ext-apps` `registerAppTool` dereferences `config._meta.ui` unconditionally; removing the widget descriptor for delete/move/repo_status (rev 10 widget finding) left `_meta` undefined and every session initialize 500'd (`mcp_request_error: Cannot read properties of undefined (reading 'ui')`), locking the ChatGPT connector out until restart with the fix. All three tools now carry `_meta: {}` (valid, advertises no widget). No-cards finding stands; widget stays unadvertised.

@@ -966,6 +966,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("Files to delete; all paths are validated before anything is removed."),
             },
             outputSchema: resultOutputSchema(),
+            _meta: {},
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
             const startedAt = performance.now();
@@ -1014,6 +1015,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("Destination path, relative to the workspace root; must not already exist."),
             },
             outputSchema: resultOutputSchema(),
+            _meta: {},
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
             const startedAt = performance.now();
@@ -1061,6 +1063,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe(workspaceIdDescription),
             },
             outputSchema: resultOutputSchema(),
+            _meta: {},
             annotations: REPO_STATUS_TOOL_ANNOTATIONS,
         }, async ({ workspaceId }) => {
             const startedAt = performance.now();
