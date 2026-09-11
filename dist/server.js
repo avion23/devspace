@@ -966,7 +966,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("Files to delete; all paths are validated before anything is removed."),
             },
             outputSchema: resultOutputSchema(),
-            ...toolWidgetDescriptorMeta(config, "write"),
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
             const startedAt = performance.now();
@@ -1015,7 +1014,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("Destination path, relative to the workspace root; must not already exist."),
             },
             outputSchema: resultOutputSchema(),
-            ...toolWidgetDescriptorMeta(config, "write"),
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
             const startedAt = performance.now();
@@ -1063,13 +1061,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe(workspaceIdDescription),
             },
             outputSchema: resultOutputSchema(),
-            ...toolWidgetDescriptorMeta(config, "read"),
             annotations: REPO_STATUS_TOOL_ANNOTATIONS,
         }, async ({ workspaceId }) => {
             const startedAt = performance.now();
             const workspace = workspaces.getWorkspace(workspaceId);
-            const run = (args) => new Promise((resolve, reject) => {
-                execFile("git", ["-C", workspace.root, ...args], { timeout: 10_000, maxBuffer: 1_000_000 }, (error, stdout) => {
+            const run = (args, extraArgs = []) => new Promise((resolve, reject) => {
+                execFile("git", ["--no-optional-locks", "-C", workspace.root, "-c", "core.fsmonitor=false", "-c", "core.fsmonitorDaemon=false", ...extraArgs, ...args], { timeout: 10_000, maxBuffer: 8_000_000 }, (error, stdout) => {
                     if (error)
                         reject(error);
                     else
@@ -1077,31 +1074,58 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 });
             });
             try {
-                const head = await run(["rev-parse", "HEAD"]);
-                const branch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
-                const status = await run(["status", "--porcelain", "-b"]);
+                // Read-only intent is not guaranteed by execFile alone: git can
+                // execute repository-configured commands (core.fsmonitor from
+                // status) and take optional index locks. Both are disabled
+                // above; submodule recursion is skipped for the same reason.
+                const status = await run(["status", "--porcelain", "-b", "--ignore-submodules=all"]);
                 const statusLines = status.split("\n");
                 const dirtyLines = statusLines.slice(1).filter((line) => line.length > 0);
                 const dirtyCapped = dirtyLines.slice(0, 200);
+                let head = null;
+                try {
+                    head = await run(["rev-parse", "--verify", "--quiet", "HEAD"]);
+                }
+                catch { }
+                let branch = null;
+                try {
+                    branch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
+                }
+                catch { }
+                const branchLine = statusLines[0] ?? "";
+                const unborn = head === null;
+                if (branch === null || branch === "HEAD") {
+                    const unbornMatch = /No commits yet on (.+)/.exec(branchLine);
+                    branch = unbornMatch ? unbornMatch[1] : (branch ?? branchLine);
+                }
                 let upstream = null;
                 let ahead = null;
                 let behind = null;
-                try {
-                    upstream = await run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-                    const counts = (await run(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).split("\t");
-                    ahead = Number(counts[0]);
-                    behind = Number(counts[1]);
+                if (!unborn) {
+                    try {
+                        upstream = await run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+                        const counts = (await run(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).split("\t");
+                        ahead = Number(counts[0]);
+                        behind = Number(counts[1]);
+                    }
+                    catch { }
                 }
-                catch { }
                 let worktrees = [];
+                let worktreesError = null;
                 try {
-                    const wt = await run(["worktree", "list", "--porcelain"]);
-                    worktrees = wt.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
+                    const wt = await run(["worktree", "list", "--porcelain"], []);
+                    const entries = wt.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
+                    worktrees = entries.slice(0, 50);
+                    if (entries.length > worktrees.length)
+                        worktreesError = `${entries.length - worktrees.length} more worktrees not listed`;
                 }
-                catch { }
+                catch (error) {
+                    worktreesError = error instanceof Error ? error.message : String(error);
+                }
                 const payload = {
                     branch: branch,
-                    detached: branch === "HEAD",
+                    detached: !unborn && branch === "HEAD",
+                    unborn: unborn,
                     head: head,
                     upstream: upstream,
                     ahead: ahead,
@@ -1109,8 +1133,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     dirtyCount: dirtyLines.length,
                     dirtyPaths: dirtyCapped,
                     dirtyPathsTruncated: dirtyLines.length > dirtyCapped.length,
-                    branchLine: statusLines[0] ?? "",
+                    branchLine: branchLine,
                     worktrees: worktrees,
+                    worktreesError: worktreesError,
                 };
                 const text = JSON.stringify(payload, null, 2);
                 logToolCall(config, {
@@ -1630,6 +1655,25 @@ export function createServer(config = loadConfig(), options = {}) {
         res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type");
         res.sendStatus(204);
+    });
+    // RFC 9207 requires the iss parameter on authorization-response redirects,
+    // including the SDK's error redirects, which bypass the provider's success
+    // path. Wrap res.redirect for the authorize endpoint and add the issuer
+    // when the redirect target omits it.
+    app.use("/authorize", (req, res, next) => {
+        const originalRedirect = res.redirect.bind(res);
+        res.redirect = (url) => {
+            try {
+                const target = new URL(String(url), issuerUrl);
+                if (!target.searchParams.has("iss")) {
+                    target.searchParams.set("iss", issuerUrl.href);
+                    return originalRedirect(target.toString());
+                }
+            }
+            catch { }
+            return originalRedirect(url);
+        };
+        next();
     });
     app.use(mcpAuthRouter({
         provider: oauthProvider,

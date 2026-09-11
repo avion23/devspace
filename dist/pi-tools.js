@@ -1,4 +1,4 @@
-import { lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { linkSync, lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, } from "@earendil-works/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
 const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
@@ -100,22 +100,42 @@ export async function deletePathsTool(input, context) {
     catch (error) {
         return fileMutationError(formatToolError(error)[0].text);
     }
-    const deleted = [];
+    // Deduplicate and preflight everything before mutating anything: the tool
+    // validates all entries (exists, not a directory) before the first unlink.
+    const unique = [...new Map(resolved.map((path) => [path, path])).keys()];
+    const duplicates = resolved.length - unique.length;
+    const stats = new Map();
     try {
-        for (const path of resolved) {
+        for (const path of unique) {
             const st = lstatSync(path);
             if (st.isDirectory()) {
-                return fileMutationError(`${path} is a directory; delete only removes files and symlinks. Use the bash tool with rm -r for directories. (stopped after deleting ${deleted.length} of ${resolved.length})`);
+                return fileMutationError(`${path} is a directory; delete only removes files and symlinks. Use the bash tool with rm -r for directories. (nothing deleted yet; ${unique.length} paths pending)`);
             }
-            unlinkSync(path);
-            deleted.push(`${path} (${st.size} bytes)`);
+            stats.set(path, st.size);
         }
     }
     catch (error) {
-        const remaining = resolved.length - deleted.length;
-        return fileMutationError(`${formatToolError(error)[0].text} (stopped after deleting ${deleted.length} of ${resolved.length}; ${remaining} untouched)`);
+        return fileMutationError(`${formatToolError(error)[0].text} (nothing deleted yet; ${unique.length} paths pending)`);
     }
-    return { content: [{ type: "text", text: `Deleted ${deleted.length} file${deleted.length === 1 ? "" : "s"}: ${deleted.join(", ")}` }] };
+    const deleted = [];
+    const failed = [];
+    let lastError = null;
+    for (const path of unique) {
+        try {
+            unlinkSync(path);
+            deleted.push(`${path} (${stats.get(path)} bytes)`);
+        }
+        catch (error) {
+            failed.push(path);
+            lastError = error;
+        }
+    }
+    if (failed.length > 0) {
+        const suffix = deleted.length > 0 ? ` (deleted ${deleted.length}: ${deleted.join(", ")})` : "";
+        return fileMutationError(`${formatToolError(lastError)[0].text} (failed: ${failed.join(", ")})${suffix}`);
+    }
+    const duplicateNote = duplicates > 0 ? ` (${duplicates} duplicate path${duplicates === 1 ? "" : "s"} ignored)` : "";
+    return { content: [{ type: "text", text: `Deleted ${deleted.length} file${deleted.length === 1 ? "" : "s"}: ${deleted.join(", ")}${duplicateNote}` }] };
 }
 export async function movePathTool(input, context) {
     let from;
@@ -140,7 +160,31 @@ export async function movePathTool(input, context) {
         if (existing) {
             return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
         }
-        renameSync(from, to);
+        // Atomic no-replace: link(2) fails with EEXIST if `to` appears between
+        // the check and the mutation, which rename(2) would silently replace.
+        // On Linux link(2) does not dereference symlinks, so a moved symlink
+        // stays a symlink. Crash between link and unlink leaves both names
+        // pointing at the same inode (recoverable, no data loss). On EXDEV
+        // (cross-device, possible only if a mount point sits inside the
+        // workspace) fall back to checked rename.
+        try {
+            linkSync(from, to);
+        }
+        catch (error) {
+            if (error.code === "EEXIST") {
+                return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
+            }
+            if (error.code === "EXDEV") {
+                if (lstatSync(to)) {
+                    return fileMutationError(`${to} already exists; move never overwrites.`);
+                }
+                renameSync(from, to);
+            }
+            else {
+                throw error;
+            }
+        }
+        unlinkSync(from);
         return { content: [{ type: "text", text: `Moved ${from} (${st.size} bytes) to ${to}` }] };
     }
     catch (error) {
