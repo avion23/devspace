@@ -294,3 +294,7 @@ Each entry: file, what, why, backup, revert.
 ## 2026-09-11 (rev 10 hotfix) — `_meta: {}` required by ext-apps registerAppTool
 
 - `@modelcontextprotocol/ext-apps` `registerAppTool` dereferences `config._meta.ui` unconditionally; removing the widget descriptor for delete/move/repo_status (rev 10 widget finding) left `_meta` undefined and every session initialize 500'd (`mcp_request_error: Cannot read properties of undefined (reading 'ui')`), locking the ChatGPT connector out until restart with the fix. All three tools now carry `_meta: {}` (valid, advertises no widget). No-cards finding stands; widget stays unadvertised.
+
+## 2026-09-11 (rev 10 hotfix 2) — iss wrapper broke res.redirect(302, url)
+
+- The rev 10 iss middleware treated Express's two-argument form `res.redirect(302, url)` as `redirect(url)` with url=302, redirecting OAuth authorize clients to `/302?iss=...` (observed live as "Cannot GET /302?iss=..."). The wrapper now passes both forms through and appends `iss` to the URL argument only; unit-checked against five call shapes. Found by the operator hitting the authorize flow immediately after r10 shipped.

@@ -1665,16 +1665,20 @@ export function createServer(config = loadConfig(), options = {}) {
     // when the redirect target omits it.
     app.use("/authorize", (req, res, next) => {
         const originalRedirect = res.redirect.bind(res);
-        res.redirect = (url) => {
+        // Express has two forms: redirect(url) and redirect(status, url).
+        // Both must pass through intact; only the URL gains the iss parameter.
+        res.redirect = (...args) => {
+            let status = args.length === 2 ? args[0] : undefined;
+            let url = args[args.length - 1];
             try {
                 const target = new URL(String(url), issuerUrl);
                 if (!target.searchParams.has("iss")) {
                     target.searchParams.set("iss", issuerUrl.href);
-                    return originalRedirect(target.toString());
+                    url = target.toString();
                 }
             }
             catch { }
-            return originalRedirect(url);
+            return status === undefined ? originalRedirect(url) : originalRedirect(status, url);
         };
         next();
     });
