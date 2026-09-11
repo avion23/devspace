@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, } from "@earendil-works/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
 const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
@@ -88,6 +88,64 @@ export async function editFileTool(input, context) {
         path,
         edits: input.edits,
     }, context);
+}
+function fileMutationError(message) {
+    return { content: [{ type: "text", text: message }], isError: true };
+}
+export async function deletePathsTool(input, context) {
+    let resolved;
+    try {
+        resolved = input.paths.map((path) => resolveAllowedPath(path, context.cwd, [context.root]));
+    }
+    catch (error) {
+        return fileMutationError(formatToolError(error)[0].text);
+    }
+    const deleted = [];
+    try {
+        for (const path of resolved) {
+            const st = lstatSync(path);
+            if (st.isDirectory()) {
+                return fileMutationError(`${path} is a directory; delete only removes files and symlinks. Use the bash tool with rm -r for directories. (stopped after deleting ${deleted.length} of ${resolved.length})`);
+            }
+            unlinkSync(path);
+            deleted.push(`${path} (${st.size} bytes)`);
+        }
+    }
+    catch (error) {
+        const remaining = resolved.length - deleted.length;
+        return fileMutationError(`${formatToolError(error)[0].text} (stopped after deleting ${deleted.length} of ${resolved.length}; ${remaining} untouched)`);
+    }
+    return { content: [{ type: "text", text: `Deleted ${deleted.length} file${deleted.length === 1 ? "" : "s"}: ${deleted.join(", ")}` }] };
+}
+export async function movePathTool(input, context) {
+    let from;
+    let to;
+    try {
+        from = resolveAllowedPath(input.from, context.cwd, [context.root]);
+        to = resolveAllowedPath(input.to, context.cwd, [context.root]);
+    }
+    catch (error) {
+        return fileMutationError(formatToolError(error)[0].text);
+    }
+    try {
+        const st = lstatSync(from);
+        if (st.isDirectory()) {
+            return fileMutationError(`${from} is a directory; move only renames files and symlinks. Use the bash tool with mv for directories.`);
+        }
+        let existing = null;
+        try {
+            existing = lstatSync(to);
+        }
+        catch { }
+        if (existing) {
+            return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
+        }
+        renameSync(from, to);
+        return { content: [{ type: "text", text: `Moved ${from} (${st.size} bytes) to ${to}` }] };
+    }
+    catch (error) {
+        return fileMutationError(formatToolError(error)[0].text);
+    }
 }
 export async function grepFilesTool(input, context) {
     if (input.path)

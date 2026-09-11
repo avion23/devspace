@@ -81,8 +81,10 @@ export class SingleUserOAuthProvider {
     codes = new Map();
     oauthStore;
     resourceServerUrl;
-    constructor(config, resourceServerUrl, stateDir) {
+    issuerUrl;
+    constructor(config, resourceServerUrl, stateDir, issuerUrl) {
         this.config = config;
+        this.issuerUrl = issuerUrl;
         this.resourceServerUrl = resourceUrlFromServerUrl(resourceServerUrl);
         this.oauthStore = new SqliteOAuthStore(stateDir);
         this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
@@ -126,6 +128,7 @@ export class SingleUserOAuthProvider {
         redirectUrl.searchParams.set("code", code);
         if (params.state !== undefined)
             redirectUrl.searchParams.set("state", params.state);
+        redirectUrl.searchParams.set("iss", this.issuerUrl.href);
         res.redirect(302, redirectUrl.href);
     }
     async challengeForAuthorizationCode(client, authorizationCode) {

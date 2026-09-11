@@ -263,3 +263,17 @@ Each entry: file, what, why, backup, revert.
   per-host restart commands). Full (e) revert (back to 256): use the
   `*-hotfix4-20260905` backups the same way. Reinstalling the `v1.0.8-r7`
   tarball reverts the whole rev-8 hotfix.
+
+## 2026-09-11 (rev 9) — delete/move/repo_status file tools + RFC 9207 OAuth issuer
+
+- Files: `dist/server.js`, `dist/pi-tools.js`, `dist/oauth-provider.js` (oauth = the 2026-09-10 live-only patch, now folded into the tag).
+- What:
+  - New MCP tool `delete` (`deletePathsTool`, pi-tools.js): `paths[]` validated via `resolveAllowedPath` (workspace-root scoped), files and symlinks only — refuses directories with a pointer to `bash rm -r`; unlink proceeds per-path after all validations, failures report how many were already deleted; outside-root paths return the normal `{isError:true}` shape (no thrown protocol error).
+  - New MCP tool `move` (`movePathTool`): `from`/`to` both root-validated; refuses directories and any existing destination (including dangling symlinks, checked with non-throwing `lstat`); never overwrites.
+  - New MCP tool `repo_status`: one read-only call returning JSON {branch, detached, head, upstream, ahead, behind, dirtyCount, dirtyPaths (cap 200 + truncation flag), branchLine, worktrees} via `git -C <workspace.root>` execFile (10s timeout, 1MB buffer). Replaces repeated shell `rev-parse`/`status`/`rev-list`/`worktree list` reconstruction.
+  - `serverInstructions` (standard mode): mentions delete/move; shell contract now states git state changes (add/commit/merge/rebase/push) are expected shell work and that generated build artifacts (target/, caches, coverage, reports) are expected mutations — resolves the "shell must not modify files but git rm/deletion needs shell" contradiction reported by ChatGPT audit sessions.
+  - OAuth (from the 2026-09-10 live patch, now official): `authorization_response_iss_parameter_supported`, `iss` callback parameter, `createOAuthMetadata`, bare PRM `OPTIONS` 204.
+- Why: ChatGPT audit sessions could not delete the seven obsolete tombstone scripts (no delete primitive; bash contract forbade file mutation), reconstructed repo state via repeated shell git, and strict MCP clients needed RFC 9207. Minimal set that fixes real, observed friction; larger asks (git mutation tool family, image/HTML viewing, transactional multi-file patch, SQL/call-graph/subagent-health tools) deliberately deferred.
+- Backups: pre-rev9 `pi-tools.js` is byte-exact at `git show 8319861:dist/pi-tools.js` (hash matches the r8-era manifest 008b8431). Pre-rev9 `server.js`/`oauth-provider.js` (r8+OAuth) were overwritten before backup (orchestrator sequencing error, 2026-09-11); preserved instead: `~/.devspace/baks/oauth-delta-r8-to-r9-20260910.patch` (pure oauth-provider.js delta) and `~/.devspace/baks/server.js-r8-to-r9-full-20260911.patch` (full mixed delta, rev-9 hunks are the three registration blocks + toolNames/instructions lines). instance2 retains a related but divergent OAuth variant (server fb620fd1, oauth 90ff3fd1) as reference only.
+- Revert: reinstall `v1.0.8-r8` tarball, re-apply the OAuth patch per the 2026-09-10 entry (or restore server.js by reverse-applying the rev-9 hunks from the saved full delta), then regenerate `/etc/devspace-fork.sha256`.
+- Applied by: orchestrator session 2026-09-11; validated with `node --check` (both files) and a live behavior matrix (delete one/multi/outside-root/dir-refusal-with-partial-state/symlink/nonexistent; move fresh/dangling-dest/dir/outside-root; no root escapes).

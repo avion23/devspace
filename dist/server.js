@@ -4,7 +4,7 @@ import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { createOAuthMetadata, mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -17,7 +17,8 @@ import { isArtifactDownloadSupportedPlatform, registerArtifactTools, } from "./a
 import { loadConfig } from "./config.js";
 import { createOpenAIIncomingArtifactAdapter, } from "./incoming-artifacts.js";
 import { logEvent, requestIp, requestPath, commandPreview, sessionIdPrefix, } from "./logger.js";
-import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS, editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, readFileTool, runShellTool, writeFileTool, } from "./pi-tools.js";
+import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS, deletePathsTool, editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, movePathTool, readFileTool, runShellTool, writeFileTool, } from "./pi-tools.js";
+import { execFile } from "node:child_process";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { McpSessionRegistry, } from "./mcp-sessions.js";
 import { ProcessSessionManager } from "./process-sessions.js";
@@ -100,6 +101,9 @@ const toolNames = {
     read: "read",
     write: "write",
     edit: "edit",
+    delete: "delete",
+    move: "move",
+    repoStatus: "repo_status",
     grep: "grep",
     glob: "glob",
     ls: "ls",
@@ -123,7 +127,7 @@ function serverInstructions(config) {
         ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
         : "";
     const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
-    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, ${toolNames.delete} for removing files, and ${toolNames.move} for renames and moves; use ${toolNames.shell} for tests, builds, git inspection, git state changes (add, commit, merge, rebase, push), package scripts, and commands that are better executed by the shell. Do not create or modify project file content with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files. Generated build artifacts (target/, caches, coverage, reports) written by test and build commands are expected.${artifactInstruction}${showChangesInstruction}`;
 }
 function formatVisibleAgent(agent) {
     const model = agent.model ? `, model ${agent.model}` : "";
@@ -949,6 +953,189 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 },
             };
         });
+        registerAppTool(server, toolNames.delete, {
+            title: "Delete files",
+            description: `Delete one or more files or symlinks in a workspace. Refuses directories; use ${toolNames.shell} with rm -r for those. Never overwrites or follows links out of the workspace.`,
+            inputSchema: {
+                workspaceId: z
+                    .string()
+                    .describe(workspaceIdDescription),
+                paths: z
+                    .array(z.string().describe("File path to delete, relative to the workspace root."))
+                    .min(1)
+                    .describe("Files to delete; all paths are validated before anything is removed."),
+            },
+            outputSchema: resultOutputSchema(),
+            ...toolWidgetDescriptorMeta(config, "write"),
+            annotations: WRITE_TOOL_ANNOTATIONS,
+        }, async ({ workspaceId, ...input }) => {
+            const startedAt = performance.now();
+            const workspace = workspaces.getWorkspace(workspaceId);
+            for (const path of input.paths) {
+                workspaces.resolvePath(workspace, path);
+            }
+            const response = await deletePathsTool(input, {
+                cwd: workspace.root,
+                root: workspace.root,
+            });
+            if (response.isError) {
+                logFailedToolResponse(config, {
+                    tool: toolNames.delete,
+                    workspaceId,
+                    path: input.paths.join(", "),
+                }, response.content, startedAt);
+                return response;
+            }
+            logToolCall(config, {
+                tool: toolNames.delete,
+                workspaceId,
+                path: input.paths.join(", "),
+                success: true,
+                durationMs: Math.round(performance.now() - startedAt),
+            });
+            return {
+                ...response,
+                structuredContent: {
+                    result: contentText(response.content),
+                },
+            };
+        });
+        registerAppTool(server, toolNames.move, {
+            title: "Move file",
+            description: `Rename or move a file or symlink within a workspace. Refuses directories and never overwrites an existing destination.`,
+            inputSchema: {
+                workspaceId: z
+                    .string()
+                    .describe(workspaceIdDescription),
+                from: z
+                    .string()
+                    .describe("Source file path, relative to the workspace root."),
+                to: z
+                    .string()
+                    .describe("Destination path, relative to the workspace root; must not already exist."),
+            },
+            outputSchema: resultOutputSchema(),
+            ...toolWidgetDescriptorMeta(config, "write"),
+            annotations: WRITE_TOOL_ANNOTATIONS,
+        }, async ({ workspaceId, ...input }) => {
+            const startedAt = performance.now();
+            const workspace = workspaces.getWorkspace(workspaceId);
+            workspaces.resolvePath(workspace, input.from);
+            workspaces.resolvePath(workspace, input.to);
+            const response = await movePathTool(input, {
+                cwd: workspace.root,
+                root: workspace.root,
+            });
+            if (response.isError) {
+                logFailedToolResponse(config, {
+                    tool: toolNames.move,
+                    workspaceId,
+                    path: input.from,
+                }, response.content, startedAt);
+                return response;
+            }
+            logToolCall(config, {
+                tool: toolNames.move,
+                workspaceId,
+                path: input.from,
+                success: true,
+                durationMs: Math.round(performance.now() - startedAt),
+            });
+            return {
+                ...response,
+                structuredContent: {
+                    result: contentText(response.content),
+                },
+            };
+        });
+        const REPO_STATUS_TOOL_ANNOTATIONS = {
+            readOnlyHint: true,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: false,
+        };
+        registerAppTool(server, toolNames.repoStatus, {
+            title: "Repository status",
+            description: "Read-only git state of the workspace in one call: branch, detached state, HEAD, upstream with ahead/behind counts, dirty paths (capped at 200), and worktrees.",
+            inputSchema: {
+                workspaceId: z
+                    .string()
+                    .describe(workspaceIdDescription),
+            },
+            outputSchema: resultOutputSchema(),
+            ...toolWidgetDescriptorMeta(config, "read"),
+            annotations: REPO_STATUS_TOOL_ANNOTATIONS,
+        }, async ({ workspaceId }) => {
+            const startedAt = performance.now();
+            const workspace = workspaces.getWorkspace(workspaceId);
+            const run = (args) => new Promise((resolve, reject) => {
+                execFile("git", ["-C", workspace.root, ...args], { timeout: 10_000, maxBuffer: 1_000_000 }, (error, stdout) => {
+                    if (error)
+                        reject(error);
+                    else
+                        resolve(stdout.trim());
+                });
+            });
+            try {
+                const head = await run(["rev-parse", "HEAD"]);
+                const branch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
+                const status = await run(["status", "--porcelain", "-b"]);
+                const statusLines = status.split("\n");
+                const dirtyLines = statusLines.slice(1).filter((line) => line.length > 0);
+                const dirtyCapped = dirtyLines.slice(0, 200);
+                let upstream = null;
+                let ahead = null;
+                let behind = null;
+                try {
+                    upstream = await run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+                    const counts = (await run(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).split("\t");
+                    ahead = Number(counts[0]);
+                    behind = Number(counts[1]);
+                }
+                catch { }
+                let worktrees = [];
+                try {
+                    const wt = await run(["worktree", "list", "--porcelain"]);
+                    worktrees = wt.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
+                }
+                catch { }
+                const payload = {
+                    branch: branch,
+                    detached: branch === "HEAD",
+                    head: head,
+                    upstream: upstream,
+                    ahead: ahead,
+                    behind: behind,
+                    dirtyCount: dirtyLines.length,
+                    dirtyPaths: dirtyCapped,
+                    dirtyPathsTruncated: dirtyLines.length > dirtyCapped.length,
+                    branchLine: statusLines[0] ?? "",
+                    worktrees: worktrees,
+                };
+                const text = JSON.stringify(payload, null, 2);
+                logToolCall(config, {
+                    tool: toolNames.repoStatus,
+                    workspaceId,
+                    success: true,
+                    durationMs: Math.round(performance.now() - startedAt),
+                });
+                return {
+                    content: [{ type: "text", text: text }],
+                    structuredContent: {
+                        result: text,
+                    },
+                };
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                const response = { content: [{ type: "text", text: `repo_status failed: ${message}` }], isError: true };
+                logFailedToolResponse(config, {
+                    tool: toolNames.repoStatus,
+                    workspaceId,
+                }, response.content, startedAt);
+                return response;
+            }
+        });
     }
     if (config.toolMode === "codex") {
         registerAppTool(server, "apply_patch", {
@@ -1345,9 +1532,17 @@ export function createServer(config = loadConfig(), options = {}) {
         ...(allowedHosts ? { allowedHosts } : {}),
     });
     const transports = new McpSessionRegistry();
-    const mcpUrl = new URL("/mcp", config.publicBaseUrl);
+    const issuerUrl = new URL(config.publicBaseUrl);
+    const mcpUrl = new URL("/mcp", issuerUrl);
     const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-    const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+    const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir, issuerUrl);
+    const oauthMetadata = createOAuthMetadata({
+        provider: oauthProvider,
+        issuerUrl,
+        baseUrl: issuerUrl,
+        scopesSupported: config.oauth.scopes,
+    });
+    oauthMetadata.authorization_response_iss_parameter_supported = true;
     const bearerAuth = requireBearerAuth({
         verifier: oauthProvider,
         requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
@@ -1407,7 +1602,8 @@ export function createServer(config = loadConfig(), options = {}) {
         });
         next();
     });
-    // Local patch (not upstream): ChatGPT strict-discovery GET aliases.
+    // Local patch (not upstream): ChatGPT strict-discovery GET aliases and
+    // RFC 9207 authorization-response issuer support.
     // Bare PRM serves the identical doc as PRM/mcp; AS/mcp serves the
     // identical doc as bare AS. Pure GET req.url rewrite before the SDK auth
     // router, so canonical metadataHandler serves both (identical body,
@@ -1425,10 +1621,20 @@ export function createServer(config = loadConfig(), options = {}) {
             req.url = "/.well-known/oauth-authorization-server" + q;
         next();
     });
+    app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.json(oauthMetadata);
+    });
+    app.options("/.well-known/oauth-protected-resource", (_req, res) => {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+        res.sendStatus(204);
+    });
     app.use(mcpAuthRouter({
         provider: oauthProvider,
-        issuerUrl: new URL(config.publicBaseUrl),
-        baseUrl: new URL(config.publicBaseUrl),
+        issuerUrl,
+        baseUrl: issuerUrl,
         resourceServerUrl,
         scopesSupported: config.oauth.scopes,
         resourceName: "DevSpace",
