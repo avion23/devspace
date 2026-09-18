@@ -46,7 +46,11 @@ export function presentAgentObservation(record) {
                 ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
             };
         case "running":
-            return { id: receipt.id, status: "running" };
+            return {
+                id: receipt.id,
+                status: "running",
+                ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
+            };
     }
 }
 export function formatAgentTargetCatalog(catalog) {
@@ -71,14 +75,15 @@ export function formatAgentSummary(summary) {
 }
 export function formatAgentObservation(observation) {
     const line = formatAgentReceipt(observation);
+    const warnings = formatAgentWarnings(observation.metadata);
     if (observation.status === "completed" && observation.response !== undefined) {
-        return `${line}\n\n${observation.response}`;
+        return `${line}\n\n${observation.response}${warnings ? `\n\n${warnings}` : ""}`;
     }
     if ((observation.status === "failed" || observation.status === "stopped") && observation.error) {
         const retryable = observation.error.retryable ? " [retryable]" : "";
-        return `${line} ${observation.error.code}: ${observation.error.message}${retryable}`;
+        return `${line} ${observation.error.code}: ${observation.error.message}${retryable}${warnings ? `\n${warnings}` : ""}`;
     }
-    return line;
+    return warnings ? `${line}\n${warnings}` : line;
 }
 function presentAgentStatus(status) {
     switch (status) {
@@ -106,4 +111,10 @@ function presentAgentFailure(record) {
         ...(record.errorDetail === undefined ? {} : { detail: record.errorDetail }),
         ...(record.errorFallbackAvailable === undefined ? {} : { fallback_available: record.errorFallbackAvailable }),
     };
+}
+function formatAgentWarnings(metadata) {
+    const warnings = Array.isArray(metadata?.warnings)
+        ? metadata.warnings.filter((warning) => typeof warning === "string" && warning.length > 0)
+        : [];
+    return warnings.map((warning) => `Warning: ${warning}`).join("\n");
 }

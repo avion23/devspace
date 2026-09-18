@@ -72,6 +72,21 @@ and successful `daemon logs` output is `{ "logs": "<text>" }`. Successful Codex
 fallback runs include `{ "sandbox": "worktree-embedded", "warnings": [...] }`
 metadata in the agent observation.
 
+Sandbox fallback visibility is available without inspecting the provider:
+
+```bash
+devspace agents show <id> --json
+grep codex_sandbox_fallback ~/.local/share/devspace/agentd.log
+devspace agents daemon status
+```
+
+The JSON observation from `show` exposes `metadata.sandbox` and
+`metadata.warnings`. Daemon status includes the daemon build `version`, the
+effective `sandboxFallback`, and `sandboxProbe` with `outcome` (`ok`, `denied`,
+`indeterminate`, or `unknown`) and its ISO timestamp. Plain-text `show` output
+does not print metadata generally; fallback warning lines are appended when
+warnings are present.
+
 Agent identity is explicit at the client boundary. `agents run` starts a new
 logical agent from a profile or provider; `agents continue <id>` continues an
 existing logical agent. Provider session IDs are never accepted as logical

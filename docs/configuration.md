@@ -180,12 +180,34 @@ Each entry controls one provider. Providers omitted from the array are disabled.
 `model` and `effort` are optional defaults; an invocation override wins over a
 profile value, which wins over the provider default. The legacy boolean
 `"subagents": true` remains readable and enables every provider, but new
-configuration should use the explicit object form. On Linux, Codex probes whether
-`unshare -Ur true` is available before starting a sandboxed turn. Keep
-`sandboxFallback` as `"fail"` (the default; legacy `false` is equivalent) to reject unavailable OS sandboxes,
-or set it to `"worktree-embedded"` to allow Codex to run without an OS sandbox
-only inside the configured managed worktree root. Fallback runs are marked with
-metadata and a warning; they do not extend beyond that worktree boundary.
+configuration should use the explicit object form.
+
+### Codex sandbox fallback
+
+On Linux, Codex runs the probe command `unshare -Ur true` before a sandboxed
+turn. The probe is asynchronous, classifies results as `ok`, `denied` (the
+command ran but user namespaces were refused), or `indeterminate` (for
+example, `unshare` is missing, the probe timed out, or it could not be
+started). Results are cached for 60 seconds and concurrent callers share one
+in-flight probe. A denied probe is not the same as an indeterminate probe:
+indeterminate results are always rejected and never authorize fallback.
+
+Keep `sandboxFallback` as `"fail"` (the default; legacy `false` is equivalent)
+to reject a denied OS sandbox, or set it to `"worktree-embedded"` for eligible
+write-access turns. Read-only turns are never eligible for the unsandboxed
+fallback. After changing host user namespaces or this setting, restart the
+agent daemon (`devspace agents daemon stop`, then the next agent command; or
+restart `devspace agents daemon`) rather than restarting only `devspace serve`.
+
+The fallback has no OS sandbox. Codex runs as the daemon account with
+unrestricted filesystem and network access. The worktree check authorizes only
+the starting directory; it does not confine execution. A rename race can also
+produce a TOCTOU gap between the check and provider execution. Use this mode
+for trusted workloads only.
+
+To roll back to r10, first remove `subagents.sandboxFallback` from
+`config.json`, then reinstall r10: r10's strict schema rejects that key.
+Migration 7 is additive; keep the existing SQLite file.
 
 `devspace agents targets` shows usable providers and profiles for the current
 workspace. Add `--json` for a compact list of exact target names and their

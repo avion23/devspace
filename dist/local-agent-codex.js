@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -51,31 +51,85 @@ export function parseCodexVersion(output) {
     const match = output?.trim().match(/v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)/);
     return match?.[1];
 }
+export const sandboxProbeTtlMs = 60_000;
 const LINUX_SANDBOX_PROBE_TIMEOUT_MS = 5_000;
-const linuxSandboxProbeCache = new WeakMap();
-export function probeLinuxUserNamespace(spawnSyncImpl = spawnSync) {
+const LINUX_SANDBOX_PROBE_COMMAND = "unshare -Ur true";
+let linuxSandboxProbeCache;
+let linuxSandboxProbeInFlight;
+let linuxSandboxProbeImplementation;
+export function resetSandboxProbeCache() {
+    linuxSandboxProbeCache = undefined;
+    linuxSandboxProbeInFlight = undefined;
+    linuxSandboxProbeImplementation = undefined;
+}
+export function getLinuxSandboxProbeState() {
+    if (!linuxSandboxProbeCache)
+        return { outcome: "unknown", at: undefined };
+    return {
+        outcome: linuxSandboxProbeCache.result.outcome,
+        at: new Date(linuxSandboxProbeCache.at).toISOString(),
+    };
+}
+export function probeLinuxUserNamespace(execFileImpl = execFile, options = {}) {
     if (process.platform !== "linux")
-        return true;
-    const cached = linuxSandboxProbeCache.get(spawnSyncImpl);
-    if (cached !== undefined)
-        return cached;
-    let available = false;
-    try {
-        const result = spawnSyncImpl("unshare", ["-Ur", "true"], {
-            encoding: "utf8",
-            stdio: "ignore",
-            timeout: LINUX_SANDBOX_PROBE_TIMEOUT_MS,
-            windowsHide: true,
-        });
-        available = result?.error === undefined && result?.status === 0;
-    }
-    catch {
-        available = false;
-    }
-    linuxSandboxProbeCache.set(spawnSyncImpl, available);
-    return available;
+        return Promise.resolve({ outcome: "ok" });
+    const ttlMs = options.ttlMs ?? options.sandboxProbeTtlMs ?? sandboxProbeTtlMs;
+    const now = options.now ?? Date.now;
+    const cached = linuxSandboxProbeCache;
+    if (cached && linuxSandboxProbeImplementation === execFileImpl && now() - cached.at < ttlMs)
+        return Promise.resolve(cached.result);
+    if (linuxSandboxProbeInFlight)
+        return linuxSandboxProbeInFlight;
+    linuxSandboxProbeImplementation = execFileImpl;
+    const probe = new Promise((resolve) => {
+        let settled = false;
+        const finish = (result) => {
+            if (settled)
+                return;
+            settled = true;
+            resolve(result);
+        };
+        try {
+            const child = execFileImpl("unshare", ["-Ur", "true"], {
+                timeout: LINUX_SANDBOX_PROBE_TIMEOUT_MS,
+                windowsHide: true,
+            }, (error) => finish(classifySandboxProbeError(error)));
+            if (child && typeof child.then === "function") {
+                child.then(() => finish({ outcome: "ok" }), (error) => finish(classifySandboxProbeError(error)));
+            }
+        }
+        catch (error) {
+            finish(classifySandboxProbeError(error));
+        }
+    });
+    linuxSandboxProbeInFlight = probe
+        .then((result) => {
+        linuxSandboxProbeCache = { result, at: now() };
+        return result;
+    })
+        .finally(() => {
+        linuxSandboxProbeInFlight = undefined;
+    });
+    return linuxSandboxProbeInFlight;
 }
 export const probeLinuxSandbox = probeLinuxUserNamespace;
+function classifySandboxProbeError(error) {
+    if (!error)
+        return { outcome: "ok" };
+    const code = error?.code;
+    if (code === "ENOENT")
+        return { outcome: "indeterminate", reason: "not_found" };
+    if (error?.killed === true || error?.timedOut === true || code === "ETIMEDOUT")
+        return { outcome: "indeterminate", reason: "timeout" };
+    if (typeof code === "number" || typeof error?.signal === "string") {
+        return {
+            outcome: "denied",
+            ...(code === undefined || code === null ? {} : { code }),
+            ...(typeof error.signal === "string" ? { signal: error.signal } : {}),
+        };
+    }
+    return { outcome: "indeterminate", reason: "spawn_error" };
+}
 export class CodexAppServerRuntime {
     options;
     provider = "codex";
@@ -83,8 +137,15 @@ export class CodexAppServerRuntime {
     rpc;
     alive = true;
     closePromise;
+    sandboxProbeState = { outcome: "unknown", at: new Date().toISOString() };
     constructor(options) {
-        this.options = options;
+        this.options = {
+            ...options,
+            onSandboxProbeState: (state) => {
+                this.sandboxProbeState = state;
+                options.onSandboxProbeState?.(state);
+            },
+        };
         this.child = spawn(options.command, ["app-server"], {
             env: options.env,
             stdio: ["pipe", "pipe", "pipe"],
@@ -123,7 +184,22 @@ export class CodexAppServerRuntime {
                         message: "Codex app-server is not running.",
                     });
                 }
-                const sandbox = resolveCodexSandbox(input, this.options);
+                const sandbox = await resolveCodexSandbox(input, {
+                    ...this.options,
+                    onSandboxFallback: async (event) => {
+                        await callbacks?.onSandboxFallback?.(event);
+                        try {
+                            await this.options.onSandboxFallback?.(event);
+                        }
+                        catch {
+                            // Logging must never prevent a validated fallback from running.
+                        }
+                    },
+                    onSandboxProbeState: (state) => {
+                        this.options.onSandboxProbeState?.(state);
+                        callbacks?.onSandboxProbeState?.(state);
+                    },
+                });
                 const providerInput = sandbox.workspaceRoot
                     ? { ...input, workspaceRoot: sandbox.workspaceRoot }
                     : input;
@@ -185,6 +261,9 @@ export class CodexAppServerRuntime {
     isAlive() {
         return this.alive && !this.child.killed && this.child.exitCode === null;
     }
+    getSandboxProbeState() {
+        return this.sandboxProbeState;
+    }
     async close() {
         if (this.closePromise)
             return this.closePromise;
@@ -230,6 +309,10 @@ export class CodexLocalAgentDriver {
     worktreeRoot;
     sandboxProbe;
     onSandboxFallback;
+    onSandboxProbeState;
+    sandboxProbeTtlMs;
+    execFile;
+    sandboxProbeState = { outcome: "unknown", at: new Date().toISOString() };
     constructor(env = process.env, commandResolver = resolveCodexCommand, options = {}) {
         this.env = env;
         this.commandResolver = commandResolver;
@@ -237,6 +320,12 @@ export class CodexLocalAgentDriver {
         this.worktreeRoot = options.worktreeRoot;
         this.sandboxProbe = options.sandboxProbe;
         this.onSandboxFallback = options.onSandboxFallback;
+        this.sandboxProbeTtlMs = options.sandboxProbeTtlMs;
+        this.execFile = options.execFile;
+        this.onSandboxProbeState = (state) => {
+            this.sandboxProbeState = state;
+            options.onSandboxProbeState?.(state);
+        };
     }
     runtimeKey(_context) {
         const command = this.resolveCommand();
@@ -276,6 +365,9 @@ export class CodexLocalAgentDriver {
                     worktreeRoot: this.worktreeRoot,
                     sandboxProbe: this.sandboxProbe,
                     onSandboxFallback: this.onSandboxFallback,
+                    sandboxProbeTtlMs: this.sandboxProbeTtlMs,
+                    execFile: this.execFile,
+                    onSandboxProbeState: this.onSandboxProbeState,
                 });
                 try {
                     await runtime.initialize();
@@ -301,6 +393,12 @@ export class CodexLocalAgentDriver {
             this.commandResolved = true;
         }
         return this.resolvedCommand;
+    }
+    getSandboxProbeState() {
+        return this.sandboxProbeState;
+    }
+    get cachedSandboxProbeState() {
+        return this.sandboxProbeState;
     }
 }
 const MAX_TURN_ITEMS = 10_000;
@@ -483,20 +581,48 @@ function normalCodexSandbox(input) {
         sandboxPolicy: sandboxPolicyFor(input.writeMode),
     };
 }
-export function resolveCodexSandbox(input, options = {}) {
+export async function resolveCodexSandbox(input, options = {}) {
     const normal = normalCodexSandbox(input);
     if (process.platform !== "linux" || normal.sandbox === "danger-full-access")
         return normal;
-    const available = options.sandboxProbe?.() ?? probeLinuxUserNamespace();
-    if (available)
+    let probe;
+    try {
+        probe = options.sandboxProbe
+            ? normalizeSandboxProbe(await options.sandboxProbe())
+            : await probeLinuxUserNamespace(options.execFile, { ttlMs: options.sandboxProbeTtlMs });
+    }
+    catch (cause) {
+        probe = classifySandboxProbeError(cause);
+    }
+    options.onSandboxProbeState?.({ outcome: probe.outcome, at: new Date().toISOString() });
+    if (probe.outcome === "ok")
         return normal;
+    if (probe.outcome === "indeterminate") {
+        throw sandboxUnavailable({
+            stage: "probe",
+            detail: indeterminateProbeDetail(probe),
+            fallbackAvailable: false,
+            operation: "run",
+            retryable: true,
+        });
+    }
     const fallbackEnabled = isSandboxFallbackEnabled(options.sandboxFallback);
     if (!fallbackEnabled) {
         throw sandboxUnavailable({
             stage: "probe",
-            detail: "Linux user namespaces are unavailable (unshare -Ur true failed), and the worktree-embedded fallback is disabled.",
+            detail: deniedProbeDetail(probe),
+            fallbackAvailable: true,
+            operation: "run",
+            retryable: false,
+        });
+    }
+    if (normal.sandbox === "read-only") {
+        throw sandboxUnavailable({
+            stage: "policy",
+            detail: "read-only turns are not eligible for the unsandboxed fallback; fix user namespaces or run with write access.",
             fallbackAvailable: false,
             operation: "run",
+            retryable: false,
         });
     }
     let workspaceRoot;
@@ -512,28 +638,54 @@ export function resolveCodexSandbox(input, options = {}) {
             cause,
         });
     }
-    const warning = "Codex is running without an OS sandbox; the managed worktree is the remaining confinement boundary.";
+    const warning = "Codex is running WITHOUT an OS sandbox as the daemon account: unrestricted filesystem and network access. The worktree check authorized only the starting directory; it does not confine execution. Enable this fallback for trusted workloads only.";
     const metadata = {
         sandbox: "worktree-embedded",
         warnings: [warning],
     };
-    try {
-        options.onSandboxFallback?.({
-            provider: "codex",
-            workspaceRoot,
-            sandbox: metadata.sandbox,
-            warning,
-        });
-    }
-    catch {
-        // Diagnostics must never prevent a safe fallback from running.
-    }
+    await options.onSandboxFallback?.({
+        provider: "codex",
+        workspaceRoot,
+        sandbox: metadata.sandbox,
+        warning,
+        metadata,
+    });
     return {
         sandbox: sandboxFor("full_access"),
         sandboxPolicy: sandboxPolicyFor("full_access"),
         workspaceRoot,
         metadata,
     };
+}
+function normalizeSandboxProbe(value) {
+    if (value === true)
+        return { outcome: "ok" };
+    if (value === false)
+        return { outcome: "denied" };
+    if (value && typeof value === "object" && (value.outcome === "ok" || value.outcome === "denied" || value.outcome === "indeterminate")) {
+        return {
+            outcome: value.outcome,
+            ...(value.reason === undefined ? {} : { reason: value.reason }),
+            ...(value.code === undefined ? {} : { code: value.code }),
+            ...(value.signal === undefined ? {} : { signal: value.signal }),
+        };
+    }
+    return { outcome: "indeterminate", reason: "spawn_error" };
+}
+function indeterminateProbeDetail(probe) {
+    switch (probe.reason) {
+        case "not_found":
+            return `Linux user namespace probe could not run: unshare not found in PATH (probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+        case "timeout":
+            return `Linux user namespace probe timed out after ${LINUX_SANDBOX_PROBE_TIMEOUT_MS}ms (probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+        default:
+            return `Linux user namespace probe could not start (spawn error; probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+    }
+}
+function deniedProbeDetail(probe) {
+    const status = probe.code === undefined ? "failed" : `exited with code ${String(probe.code)}`;
+    const signal = probe.signal ? ` (signal ${probe.signal})` : "";
+    return `Linux user namespace probe denied: ${LINUX_SANDBOX_PROBE_COMMAND} ${status}${signal}. set subagents.sandboxFallback to "worktree-embedded" to permit unsandboxed execution from an eligible worktree. after host fixes run: devspace agents daemon stop`;
 }
 function sandboxUnavailable(fields) {
     return new AgentSandboxUnavailableError({
@@ -543,7 +695,7 @@ function sandboxUnavailable(fields) {
         stage: fields.stage,
         detail: fields.detail,
         operation: fields.operation,
-        retryable: false,
+        retryable: fields.retryable ?? false,
         fallbackAvailable: fields.fallbackAvailable,
         cause: fields.cause,
         message: fields.detail,

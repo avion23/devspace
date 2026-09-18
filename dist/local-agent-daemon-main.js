@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.js";
 import { createLocalAgentDrivers } from "./local-agent-adapters.js";
 import { loadLocalAgentProfiles } from "./local-agent-profiles.js";
@@ -8,17 +9,20 @@ import { LocalAgentManager } from "./local-agent-manager.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
 const config = loadConfig();
+const daemonBuildVersion = readPackageVersion();
 const DEFAULT_DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 const paths = localAgentDaemonPaths(config.stateDir);
 const log = (level, event, fields) => writeLocalAgentDaemonLog(paths, level, event, fields);
 const store = new LocalAgentStore(paths.stateDir);
+const drivers = createLocalAgentDrivers({
+    sandboxFallback: config.subagents.sandboxFallback,
+    worktreeRoot: config.worktreeRoot,
+    onSandboxFallback: (fields) => log("warn", "codex_sandbox_fallback", fields),
+});
+const codexDriver = drivers.find((driver) => driver.provider === "codex");
 const manager = new LocalAgentManager({
     store,
-    drivers: createLocalAgentDrivers({
-        sandboxFallback: config.subagents.sandboxFallback,
-        worktreeRoot: config.worktreeRoot,
-        onSandboxFallback: (fields) => log("warn", "codex_sandbox_fallback", fields),
-    }),
+    drivers,
     pool: new LocalAgentRuntimePool({ logger: log }),
     loadProfiles: (workspaceRoot) => loadLocalAgentProfiles(config, workspaceRoot, { includeDisabled: true }),
     agentDir: config.agentDir,
@@ -37,6 +41,9 @@ const daemon = new LocalAgentDaemon({
     onClosed: () => { if (!shuttingDown)
         process.exit(0); },
     idleShutdownMs: parseIdleShutdownMs(process.env.DEVSPACE_AGENTD_IDLE_TIMEOUT_MS),
+    buildVersion: daemonBuildVersion,
+    sandboxFallback: config.subagents.sandboxFallback,
+    getSandboxProbeState: () => codexDriver?.getSandboxProbeState?.(),
 });
 let shuttingDown = false;
 const shutdown = () => {
@@ -87,4 +94,13 @@ function parseShutdownTimeoutMs(value) {
         throw new Error("DEVSPACE_AGENTD_SHUTDOWN_TIMEOUT_MS must be a non-negative duration.");
     }
     return parsed;
+}
+function readPackageVersion() {
+    try {
+        const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+        return typeof packageJson.version === "string" && packageJson.version.trim() ? packageJson.version : "unknown";
+    }
+    catch {
+        return "unknown";
+    }
 }

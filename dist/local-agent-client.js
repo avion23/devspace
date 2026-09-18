@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { matchError, Result } from "better-result";
-import { AgentDaemonInvalidResponseError, AgentDaemonProtocolMismatchError, AgentDaemonStartupError, AgentDaemonTimeoutError, AgentDaemonUnavailableError, AgentSandboxUnavailableError, agentErrorFromPayload, isAgentDaemonError, isProgrammerDefect, } from "./local-agent-errors.js";
+import { AgentDaemonBusyError, AgentDaemonInvalidResponseError, AgentDaemonProtocolMismatchError, AgentDaemonStartupError, AgentDaemonTimeoutError, AgentDaemonUnavailableError, AgentSandboxUnavailableError, agentErrorFromPayload, isAgentDaemonError, isProgrammerDefect, } from "./local-agent-errors.js";
 import { decodeAgentRecord, decodeAgentRecordList, decodeDaemonLogs, decodeDaemonStatus, decodeLocalAgentDaemonResponse, encodeLocalAgentDaemonRequest, LocalAgentDaemonProtocolError, } from "./local-agent-daemon-protocol.js";
 import { LOCAL_AGENT_DAEMON_PROTOCOL_VERSION, ensureLocalAgentDaemonSecret, isProcessAlive, localAgentDaemonPaths, readLocalAgentDaemonSecret, } from "./local-agent-daemon-lifecycle.js";
 const DEFAULT_STARTUP_TIMEOUT_MS = 8_000;
@@ -54,8 +54,8 @@ export class LocalAgentClient {
         const result = await this.requestExisting("daemon.status", {});
         return decodeRequestResult(result, "daemon.status", decodeDaemonStatus);
     }
-    async stop() {
-        const result = await this.requestExisting("daemon.stop", {});
+    async stop(force = true) {
+        const result = await this.requestExisting("daemon.stop", { force });
         return decodeRequestResult(result, "daemon.stop", decodeDaemonStatus);
     }
     async logs(lines = 200) {
@@ -162,6 +162,7 @@ export class LocalAgentClient {
         if (status.isErr())
             return status;
         if (status.value.activeTurns > 0) {
+            console.warn("Local agent daemon upgrade deferred: active turns are still running; retry later.");
             return Result.err(new AgentDaemonProtocolMismatchError({
                 code: "DAEMON_PROTOCOL_MISMATCH",
                 operation: "startup",
@@ -175,10 +176,39 @@ export class LocalAgentClient {
             protocolVersion,
             authToken,
             method: "daemon.stop",
-            params: {},
+            params: { force: false },
         }, this.requestTimeoutMs);
-        if (stopResponse.isErr() || !stopResponse.value.ok)
+        if (stopResponse.isErr())
             return Result.err(mismatch);
+        if (!stopResponse.value.ok) {
+            const error = decodeRemoteError(stopResponse.value.error, "startup");
+            if (AgentDaemonBusyError.is(error)) {
+                console.warn("Local agent daemon upgrade deferred: active turns are still running; retry later.");
+                return Result.err(new AgentDaemonProtocolMismatchError({
+                    code: "DAEMON_PROTOCOL_MISMATCH",
+                    operation: "startup",
+                    retryable: true,
+                    cause: error,
+                    message: "An older local agent daemon is still running active turns. Retry after they finish.",
+                }));
+            }
+            if (error.code === "DAEMON_INVALID_REQUEST") {
+                const legacyStopResponse = await sendRequest(this.endpoint, {
+                    requestId: randomUUID(),
+                    protocolVersion,
+                    authToken,
+                    method: "daemon.stop",
+                    params: {},
+                }, this.requestTimeoutMs);
+                if (!legacyStopResponse.isErr() && legacyStopResponse.value.ok) {
+                    return this.waitForOlderDaemonExit(authToken, protocolVersion, status.value.pid, mismatch);
+                }
+            }
+            return Result.err(mismatch);
+        }
+        return this.waitForOlderDaemonExit(authToken, protocolVersion, status.value.pid, mismatch);
+    }
+    async waitForOlderDaemonExit(authToken, protocolVersion, pid, mismatch) {
         const deadline = Date.now() + this.startupTimeoutMs;
         while (Date.now() < deadline) {
             await delay(RETRY_DELAY_MS);
@@ -190,7 +220,7 @@ export class LocalAgentClient {
                 params: {},
             }, Math.min(this.requestTimeoutMs, 250));
             if (probe.isErr() && probe.error.code === "DAEMON_UNAVAILABLE") {
-                if (!existsSync(this.paths.lockPath) || !isProcessAlive(status.value.pid)) {
+                if (!existsSync(this.paths.lockPath) || !isProcessAlive(pid)) {
                     return Result.ok(undefined);
                 }
                 continue;
@@ -448,6 +478,7 @@ function isRequestError(method, error) {
         AgentProviderExecutionError: () => "provider",
         AgentSandboxUnavailableError: () => "sandbox",
         AgentDaemonUnavailableError: () => "daemon",
+        AgentDaemonBusyError: () => "daemon",
         AgentDaemonStartupError: () => "daemon",
         AgentDaemonTimeoutError: () => "daemon",
         AgentDaemonProtocolMismatchError: () => "daemon",

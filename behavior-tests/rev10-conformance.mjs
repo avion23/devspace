@@ -1,9 +1,22 @@
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync, symlinkSync, rmSync, existsSync, readFileSync } from "node:fs";
-import { deletePathsTool, movePathTool, readFileTool, writeFileTool } from "/tmp/ds-r8/dist/pi-tools.js";
-import { resolveAllowedPath } from "/tmp/ds-r8/dist/roots.js";
+import { relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { deletePathsTool, movePathTool, readFileTool, writeFileTool } from "../dist/pi-tools.js";
+import { resolveAllowedPath } from "../dist/roots.js";
+
+const checkout = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const resolvedModules = [
+  fileURLToPath(import.meta.resolve("../dist/pi-tools.js")),
+  fileURLToPath(import.meta.resolve("../dist/roots.js")),
+];
+const modulePathsInsideCheckout = resolvedModules.every((path) => {
+  const relationship = relative(checkout, resolve(path));
+  return relationship === "" || (!relationship.startsWith("..") && !relationship.includes(".."));
+});
 
 const base = "/tmp/rev10-test/wk";
+process.on("exit", () => rmSync("/tmp/rev10-test", { recursive: true, force: true }));
 rmSync(base, { recursive: true, force: true });
 mkdirSync(base + "/sub", { recursive: true });
 rmSync("/tmp/rev10-test/out", { recursive: true, force: true }); mkdirSync("/tmp/rev10-test/out");
@@ -19,7 +32,7 @@ const check = (name, cond, detail = "") => { if (cond) { pass++; } else { fail++
 // 1. intermediate symlink escape must refuse (all destructive + read/write)
 let denied = 0;
 try { resolveAllowedPath("evil/victim", base, [base]); } catch (e) { denied = e.name === "AccessDeniedError" ? 1 : 0; }
-check("delete: intermediate symlink refused (resolveAllowedPath)", denied === 1);
+check("delete: intermediate symlink refused (resolveAllowedPath; modules stay in checkout)", denied === 1 && modulePathsInsideCheckout, resolvedModules.join(", "));
 const r1 = await deletePathsTool({ paths: ["evil/victim"] }, ctx);
 check("delete: escape refused", r1.isError === true && !existsSync("/tmp/rev10-test/out/.was-deleted") && existsSync("/tmp/rev10-test/out/victim"), JSON.stringify(r1.content));
 const r2 = await movePathTool({ from: "f1.txt", to: "evil/escaped" }, ctx);

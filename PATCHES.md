@@ -298,3 +298,10 @@ Each entry: file, what, why, backup, revert.
 ## 2026-09-11 (rev 10 hotfix 2) — iss wrapper broke res.redirect(302, url)
 
 - The rev 10 iss middleware treated Express's two-argument form `res.redirect(302, url)` as `redirect(url)` with url=302, redirecting OAuth authorize clients to `/302?iss=...` (observed live as "Cannot GET /302?iss=..."). The wrapper now passes both forms through and appends `iss` to the URL argument only; unit-checked against five call shapes. Found by the operator hitting the authorize flow immediately after r10 shipped.
+
+## 2026-09-18 (rev 12) — async Codex sandbox probe, safe fallback, and daemon visibility
+
+- Files: `dist/local-agent-codex.js`, local-agent manager/pool/protocol/client/daemon files, `behavior-tests/sandbox-fallback.mjs`, and docs.
+- What: replace the synchronous Linux `unshare -Ur true` check with a 5-second async tri-state probe cached for 60 seconds; reject indeterminate probes, permit only explicitly configured worktree fallback for denied probes, retain fallback metadata through errors and presentation, preserve it over daemon transport, and refuse read-only fallback. Add daemon status probe/build fields, structured busy-stop handling, and older-daemon stop compatibility.
+- Validation: both standalone behavior suites pass (`sandbox fallback behavior: PASS`; rev10 `17 passed, 0 failed`); modified JavaScript files pass `node --check`.
+- Revert: restore the pre-rev12 local-agent files/docs and remove the additive behavior coverage; no live installs/services were changed.

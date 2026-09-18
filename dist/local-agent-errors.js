@@ -23,6 +23,8 @@ export class AgentSandboxUnavailableError extends TaggedError("AgentSandboxUnava
 }
 export class AgentDaemonUnavailableError extends TaggedError("AgentDaemonUnavailableError")() {
 }
+export class AgentDaemonBusyError extends TaggedError("AgentDaemonBusyError")() {
+}
 export class AgentDaemonStartupError extends TaggedError("AgentDaemonStartupError")() {
 }
 export class AgentDaemonTimeoutError extends TaggedError("AgentDaemonTimeoutError")() {
@@ -52,10 +54,12 @@ export function isAgentProviderError(error) {
     return AgentProviderUnavailableError.is(error)
         || AgentProviderCancelledError.is(error)
         || AgentProviderProtocolError.is(error)
-        || AgentProviderExecutionError.is(error);
+        || AgentProviderExecutionError.is(error)
+        || AgentSandboxUnavailableError.is(error);
 }
 export function isAgentDaemonError(error) {
     return AgentDaemonUnavailableError.is(error)
+        || AgentDaemonBusyError.is(error)
         || AgentDaemonStartupError.is(error)
         || AgentDaemonTimeoutError.is(error)
         || AgentDaemonProtocolMismatchError.is(error)
@@ -84,6 +88,7 @@ export function toAgentErrorPayload(error) {
         AgentProviderExecutionError: providerErrorPayload,
         AgentSandboxUnavailableError: sandboxErrorPayload,
         AgentDaemonUnavailableError: daemonErrorPayload,
+        AgentDaemonBusyError: daemonErrorPayload,
         AgentDaemonStartupError: daemonErrorPayload,
         AgentDaemonTimeoutError: daemonErrorPayload,
         AgentDaemonProtocolMismatchError: daemonErrorPayload,
@@ -175,6 +180,14 @@ export function agentErrorFromPayload(payload) {
             return new AgentDaemonUnavailableError({
                 code: payload.code,
                 operation: payload.operation ?? "request",
+                retryable,
+                message: payload.message,
+            });
+        case "DAEMON_BUSY":
+            return new AgentDaemonBusyError({
+                code: payload.code,
+                activeTurns: payload.activeTurns,
+                operation: payload.operation ?? "daemon.stop",
                 retryable,
                 message: payload.message,
             });
@@ -386,6 +399,7 @@ function daemonErrorPayload(error) {
         message: error.message,
         retryable: error.retryable,
         operation: error.operation,
+        ...(error.activeTurns === undefined ? {} : { activeTurns: error.activeTurns }),
     };
 }
 function storeErrorPayload(error) {

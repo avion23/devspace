@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
-import { AgentDaemonInternalError, AgentDaemonInvalidRequestError, AgentDaemonProtocolMismatchError, AgentDaemonTimeoutError, AgentDaemonUnauthorizedError, AgentDaemonUnavailableError, isLocalAgentError, toAgentErrorPayload, } from "./local-agent-errors.js";
+import { AgentDaemonBusyError, AgentDaemonInternalError, AgentDaemonInvalidRequestError, AgentDaemonProtocolMismatchError, AgentDaemonTimeoutError, AgentDaemonUnauthorizedError, AgentDaemonUnavailableError, isLocalAgentError, toAgentErrorPayload, } from "./local-agent-errors.js";
 import { LOCAL_AGENT_DAEMON_PROTOCOL_VERSION, LocalAgentDaemonAlreadyRunningError, LocalAgentDaemonLock, ensureLocalAgentDaemonStateDir, ensureLocalAgentDaemonSecret, localAgentDaemonPaths, removeLocalAgentDaemonFiles, } from "./local-agent-daemon-lifecycle.js";
 import { decodeLocalAgentDaemonRequest, encodeLocalAgentDaemonResponse, LocalAgentDaemonProtocolError, } from "./local-agent-daemon-protocol.js";
 const MAX_REQUEST_BYTES = 512 * 1024;
@@ -30,6 +30,9 @@ export class LocalAgentDaemon {
     stopping = false;
     authToken;
     ownsLock = false;
+    buildVersion;
+    sandboxFallback;
+    getSandboxProbeState;
     constructor(options) {
         this.paths = options.paths ?? localAgentDaemonPaths(options.stateDir);
         this.manager = options.manager;
@@ -41,6 +44,9 @@ export class LocalAgentDaemon {
         this.now = options.now ?? Date.now;
         this.onLockAcquired = options.onLockAcquired;
         this.onClosed = options.onClosed;
+        this.buildVersion = options.buildVersion ?? "unknown";
+        this.sandboxFallback = options.sandboxFallback ?? "fail";
+        this.getSandboxProbeState = options.getSandboxProbeState;
         if (!Number.isFinite(this.idleShutdownMs) || this.idleShutdownMs < 0) {
             throw new Error("Agent daemon idle shutdown must be a non-negative finite duration.");
         }
@@ -100,6 +106,7 @@ export class LocalAgentDaemon {
         if (!this.startedAt)
             throw new Error("Local agent daemon is not started.");
         return {
+            version: this.buildVersion,
             state: this.stopping ? "stopping" : "ready",
             protocolVersion: LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
             pid: process.pid,
@@ -108,6 +115,8 @@ export class LocalAgentDaemon {
             activeTurns: this.manager.activeTurnCount,
             runtimeCount: this.manager.runtimeCount,
             clientConnections: this.sockets.size,
+            sandboxFallback: this.sandboxFallback,
+            sandboxProbe: normalizeSandboxProbeState(this.getSandboxProbeState?.(), this.startedAt),
         };
     }
     async close() {
@@ -247,6 +256,15 @@ export class LocalAgentDaemon {
             case "daemon.status":
                 return this.status();
             case "daemon.stop":
+                if (!request.params.force && this.manager.activeTurnCount > 0) {
+                    throw new AgentDaemonBusyError({
+                        code: "DAEMON_BUSY",
+                        operation: "daemon.stop",
+                        retryable: true,
+                        activeTurns: this.manager.activeTurnCount,
+                        message: "Local agent daemon has active turns; retry after they finish or force the stop.",
+                    });
+                }
                 this.stopping = true;
                 this.accepting = false;
                 return this.status();
@@ -398,4 +416,13 @@ function unwrapManagerResult(result) {
     if (result.isErr())
         throw result.error;
     return result.value;
+}
+function normalizeSandboxProbeState(state, fallbackAt) {
+    const outcome = state?.outcome;
+    return {
+        outcome: outcome === "ok" || outcome === "denied" || outcome === "indeterminate" || outcome === "unknown"
+            ? outcome
+            : "unknown",
+        at: typeof state?.at === "string" && state.at.length > 0 ? state.at : fallbackAt,
+    };
 }

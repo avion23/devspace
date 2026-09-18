@@ -229,6 +229,20 @@ export class LocalAgentManager {
                     if (updated.isErr())
                         throw updated.error;
                 },
+                onSandboxFallback: (event) => {
+                    const current = this.store.getByIdResult(record.id);
+                    if (current.isErr())
+                        throw current.error;
+                    if (!current.value)
+                        return;
+                    const metadata = event.metadata ?? {
+                        sandbox: event.sandbox,
+                        warnings: event.warning ? [event.warning] : [],
+                    };
+                    const updated = this.store.updateResult(record.id, { metadata });
+                    if (updated.isErr())
+                        throw updated.error;
+                },
             };
             const result = await this.pool.run(driver.value, context, input.value, callbacks);
             if (result.isErr()) {
@@ -295,12 +309,14 @@ export class LocalAgentManager {
         }
     }
     persistRunError(record, error, startedAt) {
+        const current = this.store.getByIdResult(record.id);
+        const metadata = current.isOk() ? current.value?.metadata : undefined;
         const persisted = this.store.updateResult(record.id, {
             status: "error",
             error: error.message,
             errorCode: error.code,
             errorRetryable: error.retryable,
-            metadata: undefined,
+            metadata,
             errorBackend: "backend" in error ? error.backend : undefined,
             errorStage: "stage" in error ? error.stage : undefined,
             errorDetail: "detail" in error ? error.detail : undefined,

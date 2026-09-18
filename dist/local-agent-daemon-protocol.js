@@ -15,8 +15,9 @@ export function decodeLocalAgentDaemonRequest(value) {
     switch (method) {
         case "hello":
         case "daemon.status":
-        case "daemon.stop":
             return { requestId, protocolVersion, authToken, method, params: decodeEmptyParams(params) };
+        case "daemon.stop":
+            return { requestId, protocolVersion, authToken, method, params: decodeStopParams(params) };
         case "agent.start":
             return {
                 requestId,
@@ -90,6 +91,7 @@ export function decodeLocalAgentDaemonResponse(value) {
                 workspaceId: optionalString(error?.workspaceId),
                 operation: optionalString(error?.operation),
                 target: optionalString(error?.target),
+                activeTurns: optionalInteger(error?.activeTurns),
             },
         };
     }
@@ -135,6 +137,7 @@ export function decodeDaemonStatus(value) {
         throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid status.");
     }
     return {
+        version: optionalString(record?.version) ?? "unknown",
         state,
         protocolVersion: requiredInteger(record?.protocolVersion, "protocolVersion"),
         pid: requiredInteger(record?.pid, "pid"),
@@ -143,6 +146,8 @@ export function decodeDaemonStatus(value) {
         activeTurns: requiredInteger(record?.activeTurns, "activeTurns"),
         runtimeCount: requiredInteger(record?.runtimeCount, "runtimeCount"),
         clientConnections: requiredInteger(record?.clientConnections, "clientConnections"),
+        sandboxFallback: decodeSandboxFallback(record?.sandboxFallback),
+        sandboxProbe: decodeSandboxProbeState(record?.sandboxProbe, record?.startedAt),
     };
 }
 export function decodeDaemonLogs(value) {
@@ -166,6 +171,18 @@ function decodeEmptyParams(value) {
         throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "This daemon method does not accept parameters.");
     }
     return {};
+}
+function decodeStopParams(value) {
+    if (value === undefined)
+        return { force: true };
+    const record = asRecord(value);
+    if (!record)
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Daemon stop options must be an object.");
+    const keys = Object.keys(record);
+    if (keys.some((key) => key !== "force") || (record.force !== undefined && typeof record.force !== "boolean")) {
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Daemon stop force must be a boolean.");
+    }
+    return { force: record.force !== false };
 }
 function decodeStartInput(value) {
     const record = asRecord(value);
@@ -261,11 +278,33 @@ function optionalContentString(value) {
 function optionalBoolean(value) {
     return typeof value === "boolean" ? value : undefined;
 }
+function optionalInteger(value) {
+    return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
 function optionalMetadata(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
         return undefined;
-    const sandbox = optionalString(value.sandbox);
-    return sandbox ? { sandbox, ...(Array.isArray(value.warnings) ? { warnings: value.warnings.filter((entry) => typeof entry === "string") } : {}) } : undefined;
+    return value;
+}
+function decodeSandboxFallback(value) {
+    if (value === undefined)
+        return "fail";
+    if (value === "fail" || value === "worktree-embedded")
+        return value;
+    throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid sandbox fallback.");
+}
+function decodeSandboxProbeState(value, fallbackAt) {
+    if (value === undefined)
+        return { outcome: "unknown", at: requiredString(fallbackAt, "startedAt") };
+    const record = asRecord(value);
+    const outcome = record?.outcome;
+    if (outcome !== "ok" && outcome !== "denied" && outcome !== "indeterminate" && outcome !== "unknown") {
+        throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid sandbox probe state.");
+    }
+    return {
+        outcome,
+        at: requiredString(record?.at, "sandboxProbe.at"),
+    };
 }
 function asRecord(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))
