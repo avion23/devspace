@@ -1,10 +1,13 @@
 import { homedir } from "node:os";
 import { spawn, spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { AgentProviderExecutionError, AgentProviderProtocolError, AgentProviderUnavailableError, captureAgentProviderResult, } from "./local-agent-errors.js";
+import { isSandboxFallbackEnabled } from "./local-agent-config.js";
+import { AgentProviderExecutionError, AgentProviderProtocolError, AgentProviderUnavailableError, AgentSandboxUnavailableError, captureAgentProviderResult, } from "./local-agent-errors.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import { terminateProcessTree } from "./process-platform.js";
+import { resolveAllowedPath } from "./roots.js";
 export function codexCommandEnvironment(env = process.env) {
     const next = { ...env };
     delete next.CODEX_INTERNAL_ORIGINATOR_OVERRIDE;
@@ -48,6 +51,31 @@ export function parseCodexVersion(output) {
     const match = output?.trim().match(/v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)/);
     return match?.[1];
 }
+const LINUX_SANDBOX_PROBE_TIMEOUT_MS = 5_000;
+const linuxSandboxProbeCache = new WeakMap();
+export function probeLinuxUserNamespace(spawnSyncImpl = spawnSync) {
+    if (process.platform !== "linux")
+        return true;
+    const cached = linuxSandboxProbeCache.get(spawnSyncImpl);
+    if (cached !== undefined)
+        return cached;
+    let available = false;
+    try {
+        const result = spawnSyncImpl("unshare", ["-Ur", "true"], {
+            encoding: "utf8",
+            stdio: "ignore",
+            timeout: LINUX_SANDBOX_PROBE_TIMEOUT_MS,
+            windowsHide: true,
+        });
+        available = result?.error === undefined && result?.status === 0;
+    }
+    catch {
+        available = false;
+    }
+    linuxSandboxProbeCache.set(spawnSyncImpl, available);
+    return available;
+}
+export const probeLinuxSandbox = probeLinuxUserNamespace;
 export class CodexAppServerRuntime {
     options;
     provider = "codex";
@@ -95,7 +123,11 @@ export class CodexAppServerRuntime {
                         message: "Codex app-server is not running.",
                     });
                 }
-                const threadResponse = await this.rpc.request(input.providerSessionId ? "thread/resume" : "thread/start", threadParams(input));
+                const sandbox = resolveCodexSandbox(input, this.options);
+                const providerInput = sandbox.workspaceRoot
+                    ? { ...input, workspaceRoot: sandbox.workspaceRoot }
+                    : input;
+                const threadResponse = await this.rpc.request(providerInput.providerSessionId ? "thread/resume" : "thread/start", threadParams(providerInput, sandbox));
                 const threadId = readString(asRecord(threadResponse)?.thread, "id");
                 if (!threadId) {
                     throw new AgentProviderProtocolError({
@@ -108,7 +140,7 @@ export class CodexAppServerRuntime {
                     });
                 }
                 await callbacks?.onSessionId?.(threadId);
-                const completed = await this.rpc.runTurn(threadId, turnParams(input, threadId));
+                const completed = await this.rpc.runTurn(threadId, turnParams(providerInput, threadId, sandbox));
                 const parsed = parseCompletedTurn(completed.event.params, completed.items);
                 if (parsed.failure) {
                     throw new AgentProviderExecutionError({
@@ -135,6 +167,7 @@ export class CodexAppServerRuntime {
                     providerSessionId: threadId,
                     finalResponse: parsed.finalResponse.trim(),
                     items: parsed.items,
+                    ...(sandbox.metadata ? { metadata: sandbox.metadata } : {}),
                 };
             },
         });
@@ -193,9 +226,17 @@ export class CodexLocalAgentDriver {
     idleTimeoutMs = 5 * 60_000;
     commandResolved = false;
     resolvedCommand;
-    constructor(env = process.env, commandResolver = resolveCodexCommand) {
+    sandboxFallback;
+    worktreeRoot;
+    sandboxProbe;
+    onSandboxFallback;
+    constructor(env = process.env, commandResolver = resolveCodexCommand, options = {}) {
         this.env = env;
         this.commandResolver = commandResolver;
+        this.sandboxFallback = options.sandboxFallback ?? "fail";
+        this.worktreeRoot = options.worktreeRoot;
+        this.sandboxProbe = options.sandboxProbe;
+        this.onSandboxFallback = options.onSandboxFallback;
     }
     runtimeKey(_context) {
         const command = this.resolveCommand();
@@ -231,6 +272,10 @@ export class CodexLocalAgentDriver {
                     command: command.executable,
                     env: codexCommandEnvironment(this.env),
                     version: command.version,
+                    sandboxFallback: this.sandboxFallback,
+                    worktreeRoot: this.worktreeRoot,
+                    sandboxProbe: this.sandboxProbe,
+                    onSandboxFallback: this.onSandboxFallback,
                 });
                 try {
                     await runtime.initialize();
@@ -397,21 +442,21 @@ class CodexAppServerRpc {
         return Array.from(this.turns.values()).find((turn) => turn.turnId === turnId);
     }
 }
-function threadParams(input) {
+function threadParams(input, sandbox = normalCodexSandbox(input)) {
     return {
         ...(input.providerSessionId ? { threadId: input.providerSessionId } : {}),
         cwd: input.workspaceRoot,
         approvalPolicy: "never",
-        sandbox: sandboxFor(input.writeMode),
+        sandbox: sandbox.sandbox,
         ...(input.model ? { model: input.model } : {}),
     };
 }
-function turnParams(input, threadId) {
+function turnParams(input, threadId, sandbox = normalCodexSandbox(input)) {
     return {
         threadId,
         input: [{ type: "text", text: input.prompt }],
         approvalPolicy: "never",
-        sandboxPolicy: sandboxPolicyFor(input.writeMode),
+        sandboxPolicy: sandbox.sandboxPolicy,
         ...(input.model ? { model: input.model } : {}),
         ...(input.effort ? { effort: input.effort } : {}),
     };
@@ -431,6 +476,78 @@ function sandboxPolicyFor(writeMode) {
         case "read_only":
         case undefined: return { type: "readOnly" };
     }
+}
+function normalCodexSandbox(input) {
+    return {
+        sandbox: sandboxFor(input.writeMode),
+        sandboxPolicy: sandboxPolicyFor(input.writeMode),
+    };
+}
+export function resolveCodexSandbox(input, options = {}) {
+    const normal = normalCodexSandbox(input);
+    if (process.platform !== "linux" || normal.sandbox === "danger-full-access")
+        return normal;
+    const available = options.sandboxProbe?.() ?? probeLinuxUserNamespace();
+    if (available)
+        return normal;
+    const fallbackEnabled = isSandboxFallbackEnabled(options.sandboxFallback);
+    if (!fallbackEnabled) {
+        throw sandboxUnavailable({
+            stage: "probe",
+            detail: "Linux user namespaces are unavailable (unshare -Ur true failed), and the worktree-embedded fallback is disabled.",
+            fallbackAvailable: false,
+            operation: "run",
+        });
+    }
+    let workspaceRoot;
+    try {
+        workspaceRoot = resolveAllowedPath(".", realpathSync(input.workspaceRoot), options.worktreeRoot ? [options.worktreeRoot] : []);
+    }
+    catch (cause) {
+        throw sandboxUnavailable({
+            stage: "worktree-confinement",
+            detail: "The no-OS-sandbox fallback requires the session cwd to resolve under the configured worktree root.",
+            fallbackAvailable: false,
+            operation: "run",
+            cause,
+        });
+    }
+    const warning = "Codex is running without an OS sandbox; the managed worktree is the remaining confinement boundary.";
+    const metadata = {
+        sandbox: "worktree-embedded",
+        warnings: [warning],
+    };
+    try {
+        options.onSandboxFallback?.({
+            provider: "codex",
+            workspaceRoot,
+            sandbox: metadata.sandbox,
+            warning,
+        });
+    }
+    catch {
+        // Diagnostics must never prevent a safe fallback from running.
+    }
+    return {
+        sandbox: sandboxFor("full_access"),
+        sandboxPolicy: sandboxPolicyFor("full_access"),
+        workspaceRoot,
+        metadata,
+    };
+}
+function sandboxUnavailable(fields) {
+    return new AgentSandboxUnavailableError({
+        code: "SANDBOX_UNAVAILABLE",
+        provider: "codex",
+        backend: "linux-user-namespace",
+        stage: fields.stage,
+        detail: fields.detail,
+        operation: fields.operation,
+        retryable: false,
+        fallbackAvailable: fields.fallbackAvailable,
+        cause: fields.cause,
+        message: fields.detail,
+    });
 }
 function parseCompletedTurn(params, items) {
     const turn = asRecord(asRecord(params)?.turn);

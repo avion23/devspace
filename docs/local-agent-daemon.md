@@ -30,7 +30,9 @@ Expected subagent failures cross the daemon boundary as structured error codes,
 not message-string conventions. Agent records in `error` state retain the safe
 message plus `errorCode` and `errorRetryable` fields so callers can distinguish
 provider cancellation, provider availability, workspace conflicts, daemon
-timeouts, and similar recovery categories after a background turn completes.
+timeouts, sandbox-unavailable failures, and similar recovery categories after a
+background turn completes. Sandbox failures use `SANDBOX_UNAVAILABLE`
+with `backend`, `stage`, `detail`, and `fallback_available` fields.
 Internal provider causes are kept out of the daemon payload and persisted JSON.
 
 The implementation treats `better-result` as the application-failure boundary,
@@ -66,7 +68,9 @@ provider session IDs, timestamps, and prior responses are not included in list
 or receipt output. Immediate failures are emitted as
 `{ error: { code, message, retryable, ... } }` with a non-zero exit code.
 Successful `daemon status` and `daemon stop` output the daemon status object,
-and successful `daemon logs` output is `{ "logs": "<text>" }`.
+and successful `daemon logs` output is `{ "logs": "<text>" }`. Successful Codex
+fallback runs include `{ "sandbox": "worktree-embedded", "warnings": [...] }`
+metadata in the agent observation.
 
 Agent identity is explicit at the client boundary. `agents run` starts a new
 logical agent from a profile or provider; `agents continue <id>` continues an

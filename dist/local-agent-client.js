@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { matchError, Result } from "better-result";
-import { AgentDaemonInvalidResponseError, AgentDaemonProtocolMismatchError, AgentDaemonStartupError, AgentDaemonTimeoutError, AgentDaemonUnavailableError, agentErrorFromPayload, isAgentDaemonError, isProgrammerDefect, } from "./local-agent-errors.js";
+import { AgentDaemonInvalidResponseError, AgentDaemonProtocolMismatchError, AgentDaemonStartupError, AgentDaemonTimeoutError, AgentDaemonUnavailableError, AgentSandboxUnavailableError, agentErrorFromPayload, isAgentDaemonError, isProgrammerDefect, } from "./local-agent-errors.js";
 import { decodeAgentRecord, decodeAgentRecordList, decodeDaemonLogs, decodeDaemonStatus, decodeLocalAgentDaemonResponse, encodeLocalAgentDaemonRequest, LocalAgentDaemonProtocolError, } from "./local-agent-daemon-protocol.js";
 import { LOCAL_AGENT_DAEMON_PROTOCOL_VERSION, ensureLocalAgentDaemonSecret, isProcessAlive, localAgentDaemonPaths, readLocalAgentDaemonSecret, } from "./local-agent-daemon-lifecycle.js";
 const DEFAULT_STARTUP_TIMEOUT_MS = 8_000;
@@ -446,6 +446,7 @@ function isRequestError(method, error) {
         AgentProviderCancelledError: () => "provider",
         AgentProviderProtocolError: () => "provider",
         AgentProviderExecutionError: () => "provider",
+        AgentSandboxUnavailableError: () => "sandbox",
         AgentDaemonUnavailableError: () => "daemon",
         AgentDaemonStartupError: () => "daemon",
         AgentDaemonTimeoutError: () => "daemon",
@@ -464,6 +465,7 @@ function isRequestError(method, error) {
             return category === "target"
                 || category === "scope"
                 || category === "conflict"
+                || category === "sandbox"
                 || category === "store";
         case "agent.get":
             return category === "target" || category === "scope" || category === "store";

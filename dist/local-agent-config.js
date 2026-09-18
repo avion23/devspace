@@ -9,6 +9,7 @@ const providerSchema = z.object({
 const subagentsSchema = z.object({
     enabled: z.boolean(),
     providers: z.array(providerSchema),
+    sandboxFallback: z.preprocess((value) => value === false ? "fail" : value, z.enum(["fail", "worktree-embedded"])).default("fail"),
 }).strict().superRefine((value, context) => {
     const seen = new Set();
     for (const [index, provider] of value.providers.entries()) {
@@ -24,7 +25,7 @@ const subagentsSchema = z.object({
 });
 export function resolveSubagentsConfig(value, env = process.env) {
     const stored = value === undefined
-        ? { enabled: false, providers: [] }
+        ? { enabled: false, providers: [], sandboxFallback: "fail" }
         : typeof value === "boolean"
             ? legacySubagentsConfig(value)
             : subagentsSchema.parse(value);
@@ -41,12 +42,16 @@ export function subagentProviderConfig(config, provider) {
 export function isSubagentProviderEnabled(config, provider) {
     return config.enabled && subagentProviderConfig(config, provider)?.enabled === true;
 }
+export function isSandboxFallbackEnabled(value) {
+    return value === "worktree-embedded";
+}
 function legacySubagentsConfig(enabled) {
     return {
         enabled,
         providers: enabled
             ? LOCAL_AGENT_PROVIDERS.map((id) => ({ id, enabled: true }))
             : [],
+        sandboxFallback: "fail",
     };
 }
 function parseBoolean(value) {

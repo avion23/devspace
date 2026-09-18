@@ -34,14 +34,16 @@ export function presentAgentObservation(record) {
                 ...receipt,
                 status: "completed",
                 ...(record.latestResponse === undefined ? {} : { response: record.latestResponse }),
+                ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
             };
         case "failed":
-            return { ...receipt, status: "failed", error: presentAgentFailure(record) };
+            return { ...receipt, status: "failed", error: presentAgentFailure(record), ...(record.metadata === undefined ? {} : { metadata: record.metadata }) };
         case "stopped":
             return {
                 ...receipt,
                 status: "stopped",
                 ...(hasAgentFailure(record) ? { error: presentAgentFailure(record) } : {}),
+                ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
             };
         case "running":
             return { id: receipt.id, status: "running" };
@@ -99,5 +101,9 @@ function presentAgentFailure(record) {
         code: record.errorCode ?? "AGENT_FAILED",
         message: record.error ?? "Subagent failed without an error message.",
         retryable: record.errorRetryable ?? false,
+        ...(record.errorBackend === undefined ? {} : { backend: record.errorBackend }),
+        ...(record.errorStage === undefined ? {} : { stage: record.errorStage }),
+        ...(record.errorDetail === undefined ? {} : { detail: record.errorDetail }),
+        ...(record.errorFallbackAvailable === undefined ? {} : { fallback_available: record.errorFallbackAvailable }),
     };
 }

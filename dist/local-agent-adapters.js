@@ -5,7 +5,12 @@ import { OpencodeLocalAgentDriver, extractOpenCodeFinalResponse, } from "./local
 import { PiLocalAgentDriver, extractPiFinalResponse, extractPiProviderError, } from "./local-agent-pi.js";
 export function createLocalAgentDrivers(options = {}) {
     return [
-        new CodexLocalAgentDriver(options.env),
+        new CodexLocalAgentDriver(options.env, options.codexCommandResolver, {
+            sandboxFallback: options.sandboxFallback,
+            worktreeRoot: options.worktreeRoot,
+            sandboxProbe: options.sandboxProbe,
+            onSandboxFallback: options.onSandboxFallback,
+        }),
         new ClaudeLocalAgentDriver(options.claudeQueryFactory, options.env),
         new OpencodeLocalAgentDriver(options.opencodeFactory),
         new PiLocalAgentDriver(options.piSessionFactory),
@@ -16,7 +21,12 @@ export function createLocalAgentDrivers(options = {}) {
 }
 export function createLocalAgentAdapter(provider, options = {}) {
     switch (provider) {
-        case "codex": return new CodexLocalAgentDriver(options.env);
+        case "codex": return new CodexLocalAgentDriver(options.env, options.codexCommandResolver, {
+            sandboxFallback: options.sandboxFallback,
+            worktreeRoot: options.worktreeRoot,
+            sandboxProbe: options.sandboxProbe,
+            onSandboxFallback: options.onSandboxFallback,
+        });
         case "claude": return new ClaudeLocalAgentDriver(options.claudeQueryFactory, options.env);
         case "opencode": return new OpencodeLocalAgentDriver(options.opencodeFactory);
         case "pi": return new PiLocalAgentDriver(options.piSessionFactory);

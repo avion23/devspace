@@ -14,7 +14,11 @@ const log = (level, event, fields) => writeLocalAgentDaemonLog(paths, level, eve
 const store = new LocalAgentStore(paths.stateDir);
 const manager = new LocalAgentManager({
     store,
-    drivers: createLocalAgentDrivers(),
+    drivers: createLocalAgentDrivers({
+        sandboxFallback: config.subagents.sandboxFallback,
+        worktreeRoot: config.worktreeRoot,
+        onSandboxFallback: (fields) => log("warn", "codex_sandbox_fallback", fields),
+    }),
     pool: new LocalAgentRuntimePool({ logger: log }),
     loadProfiles: (workspaceRoot) => loadLocalAgentProfiles(config, workspaceRoot, { includeDisabled: true }),
     agentDir: config.agentDir,

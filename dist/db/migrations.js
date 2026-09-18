@@ -29,6 +29,11 @@ const migrations = [
         name: "local-agent-effort-rename",
         up: migrateLocalAgentEffortRename,
     },
+    {
+        version: 7,
+        name: "local-agent-sandbox-metadata",
+        up: migrateLocalAgentSandboxMetadata,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -204,6 +209,13 @@ function migrateLocalAgentEffortRename(sqlite) {
         return;
     }
     sqlite.exec("alter table local_agent_sessions rename column thinking to effort");
+}
+function migrateLocalAgentSandboxMetadata(sqlite) {
+    addColumnIfMissing(sqlite, "local_agent_sessions", "metadata_json", "text");
+    addColumnIfMissing(sqlite, "local_agent_sessions", "error_backend", "text");
+    addColumnIfMissing(sqlite, "local_agent_sessions", "error_stage", "text");
+    addColumnIfMissing(sqlite, "local_agent_sessions", "error_detail", "text");
+    addColumnIfMissing(sqlite, "local_agent_sessions", "error_fallback_available", "text");
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
     const columns = sqlite.prepare(`pragma table_info(${table})`).all();

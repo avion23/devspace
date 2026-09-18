@@ -14,6 +14,13 @@ export class AgentProviderProtocolError extends TaggedError("AgentProviderProtoc
 }
 export class AgentProviderExecutionError extends TaggedError("AgentProviderExecutionError")() {
 }
+export class AgentSandboxUnavailableError extends TaggedError("AgentSandboxUnavailableError")() {
+    constructor(fields) {
+        const fallbackAvailable = fields.fallbackAvailable ?? fields.fallback_available ?? false;
+        super({ ...fields, fallbackAvailable });
+        this.fallback_available = fallbackAvailable;
+    }
+}
 export class AgentDaemonUnavailableError extends TaggedError("AgentDaemonUnavailableError")() {
 }
 export class AgentDaemonStartupError extends TaggedError("AgentDaemonStartupError")() {
@@ -62,6 +69,7 @@ export function isLocalAgentError(error) {
         || AgentConflictError.is(error)
         || AgentScopeError.is(error)
         || isAgentProviderError(error)
+        || AgentSandboxUnavailableError.is(error)
         || AgentStoreError.is(error)
         || isAgentDaemonError(error);
 }
@@ -74,6 +82,7 @@ export function toAgentErrorPayload(error) {
         AgentProviderCancelledError: providerErrorPayload,
         AgentProviderProtocolError: providerErrorPayload,
         AgentProviderExecutionError: providerErrorPayload,
+        AgentSandboxUnavailableError: sandboxErrorPayload,
         AgentDaemonUnavailableError: daemonErrorPayload,
         AgentDaemonStartupError: daemonErrorPayload,
         AgentDaemonTimeoutError: daemonErrorPayload,
@@ -147,6 +156,19 @@ export function agentErrorFromPayload(payload) {
             }
             return new AgentProviderExecutionError({ code: payload.code, ...fields });
         }
+        case "SANDBOX_UNAVAILABLE":
+            return new AgentSandboxUnavailableError({
+                code: payload.code,
+                backend: payload.backend,
+                stage: payload.stage,
+                detail: payload.detail,
+                fallbackAvailable: payload.fallback_available,
+                provider,
+                agentId: payload.agentId,
+                operation: payload.operation ?? "run",
+                retryable,
+                message: payload.message,
+            });
         case "AGENT_STORE_ERROR":
             return new AgentStoreError(payload.operation ?? "request", undefined, payload.message);
         case "DAEMON_UNAVAILABLE":
@@ -342,6 +364,20 @@ function providerErrorPayload(error) {
         provider: error.provider,
         operation: error.operation,
         ...(error.agentId ? { agentId: error.agentId } : {}),
+    };
+}
+function sandboxErrorPayload(error) {
+    return {
+        code: error.code,
+        message: error.message,
+        retryable: error.retryable,
+        ...(error.backend ? { backend: error.backend } : {}),
+        ...(error.stage ? { stage: error.stage } : {}),
+        ...(error.detail ? { detail: error.detail } : {}),
+        ...(error.provider ? { provider: error.provider } : {}),
+        ...(error.operation ? { operation: error.operation } : {}),
+        ...(error.agentId ? { agentId: error.agentId } : {}),
+        fallback_available: error.fallback_available ?? error.fallbackAvailable ?? false,
     };
 }
 function daemonErrorPayload(error) {

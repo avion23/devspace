@@ -115,9 +115,14 @@ export class LocalAgentStore {
           error = ?,
           error_code = ?,
           error_retryable = ?,
+          metadata_json = ?,
+          error_backend = ?,
+          error_stage = ?,
+          error_detail = ?,
+          error_fallback_available = ?,
           updated_at = ?
          where id = ?`)
-            .run(updated.workspaceId ?? null, resolve(updated.workspaceRoot), updated.profileName, updated.provider, updated.model ?? null, updated.effort ?? null, updated.providerSessionId ?? null, updated.status, updated.latestResponse ?? null, updated.error ?? null, updated.errorCode ?? null, updated.errorRetryable === undefined ? null : String(updated.errorRetryable), updated.updatedAt, updated.id);
+            .run(updated.workspaceId ?? null, resolve(updated.workspaceRoot), updated.profileName, updated.provider, updated.model ?? null, updated.effort ?? null, updated.providerSessionId ?? null, updated.status, updated.latestResponse ?? null, updated.error ?? null, updated.errorCode ?? null, updated.errorRetryable === undefined ? null : String(updated.errorRetryable), updated.metadata === undefined ? null : JSON.stringify(updated.metadata), updated.errorBackend ?? null, updated.errorStage ?? null, updated.errorDetail ?? null, updated.errorFallbackAvailable === undefined ? null : String(updated.errorFallbackAvailable), updated.updatedAt, updated.id);
         return updated;
     }
     updateResult(id, patch) {
@@ -157,6 +162,11 @@ function rowToLocalAgentRecord(row) {
         error: row.error ?? undefined,
         errorCode: row.error_code ?? undefined,
         errorRetryable: readOptionalBoolean(row.error_retryable),
+        metadata: readMetadata(row.metadata_json),
+        errorBackend: row.error_backend ?? undefined,
+        errorStage: row.error_stage ?? undefined,
+        errorDetail: row.error_detail ?? undefined,
+        errorFallbackAvailable: readOptionalBoolean(row.error_fallback_available),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     };
@@ -167,6 +177,17 @@ function readOptionalBoolean(value) {
     if (value === "false")
         return false;
     return undefined;
+}
+function readMetadata(value) {
+    if (!value)
+        return undefined;
+    try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+    }
+    catch {
+        return undefined;
+    }
 }
 function storeResult(operation, run) {
     try {

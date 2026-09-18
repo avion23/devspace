@@ -156,6 +156,11 @@ export class LocalAgentManager {
             error: undefined,
             errorCode: undefined,
             errorRetryable: undefined,
+            metadata: undefined,
+            errorBackend: undefined,
+            errorStage: undefined,
+            errorDetail: undefined,
+            errorFallbackAvailable: undefined,
         });
         if (updated.isErr())
             return updated;
@@ -243,6 +248,11 @@ export class LocalAgentManager {
                 error: undefined,
                 errorCode: undefined,
                 errorRetryable: undefined,
+                metadata: runResult.metadata,
+                errorBackend: undefined,
+                errorStage: undefined,
+                errorDetail: undefined,
+                errorFallbackAvailable: undefined,
             });
             if (updated.isErr())
                 throw updated.error;
@@ -263,6 +273,11 @@ export class LocalAgentManager {
                 error: "Unexpected internal subagent failure.",
                 errorCode: "AGENT_INTERNAL_ERROR",
                 errorRetryable: false,
+                metadata: undefined,
+                errorBackend: undefined,
+                errorStage: undefined,
+                errorDetail: undefined,
+                errorFallbackAvailable: undefined,
             });
             this.log("error", "agent_run_failed", {
                 provider: record.provider,
@@ -285,6 +300,13 @@ export class LocalAgentManager {
             error: error.message,
             errorCode: error.code,
             errorRetryable: error.retryable,
+            metadata: undefined,
+            errorBackend: "backend" in error ? error.backend : undefined,
+            errorStage: "stage" in error ? error.stage : undefined,
+            errorDetail: "detail" in error ? error.detail : undefined,
+            errorFallbackAvailable: "fallback_available" in error
+                ? error.fallback_available
+                : undefined,
         });
         this.log("error", "agent_run_failed", {
             provider: record.provider,

@@ -81,6 +81,10 @@ export function decodeLocalAgentDaemonResponse(value) {
                 code: requiredString(error?.code, "error.code"),
                 message: requiredString(error?.message, "error.message"),
                 retryable: optionalBoolean(error?.retryable),
+                backend: optionalString(error?.backend),
+                stage: optionalString(error?.stage),
+                detail: optionalString(error?.detail),
+                fallback_available: optionalBoolean(error?.fallback_available),
                 provider: optionalString(error?.provider),
                 agentId: optionalString(error?.agentId),
                 workspaceId: optionalString(error?.workspaceId),
@@ -110,6 +114,11 @@ export function decodeAgentRecord(value) {
         error: optionalContentString(record?.error),
         errorCode: optionalString(record?.errorCode),
         errorRetryable: optionalBoolean(record?.errorRetryable),
+        metadata: optionalMetadata(record?.metadata),
+        errorBackend: optionalString(record?.errorBackend),
+        errorStage: optionalString(record?.errorStage),
+        errorDetail: optionalString(record?.errorDetail),
+        errorFallbackAvailable: optionalBoolean(record?.errorFallbackAvailable),
         createdAt: requiredString(record?.createdAt, "createdAt"),
         updatedAt: requiredString(record?.updatedAt, "updatedAt"),
     };
@@ -251,6 +260,12 @@ function optionalContentString(value) {
 }
 function optionalBoolean(value) {
     return typeof value === "boolean" ? value : undefined;
+}
+function optionalMetadata(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+        return undefined;
+    const sandbox = optionalString(value.sandbox);
+    return sandbox ? { sandbox, ...(Array.isArray(value.warnings) ? { warnings: value.warnings.filter((entry) => typeof entry === "string") } : {}) } : undefined;
 }
 function asRecord(value) {
     if (!value || typeof value !== "object" || Array.isArray(value))

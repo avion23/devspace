@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync, } from "node:fs";
 import { join, resolve } from "node:path";
-export const LOCAL_AGENT_DAEMON_PROTOCOL_VERSION = 3;
+export const LOCAL_AGENT_DAEMON_PROTOCOL_VERSION = 4;
 export const LOCAL_AGENT_DAEMON_SOCKET_NAME = "agentd.sock";
 export const LOCAL_AGENT_DAEMON_PID_NAME = "agentd.pid";
 export const LOCAL_AGENT_DAEMON_LOCK_NAME = "agentd.lock";

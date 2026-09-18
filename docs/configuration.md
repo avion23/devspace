@@ -152,6 +152,7 @@ Enable providers and set their defaults in `~/.devspace/config.json`:
 {
   "subagents": {
     "enabled": true,
+    "sandboxFallback": "fail",
     "providers": [
       {
         "id": "codex",
@@ -179,7 +180,12 @@ Each entry controls one provider. Providers omitted from the array are disabled.
 `model` and `effort` are optional defaults; an invocation override wins over a
 profile value, which wins over the provider default. The legacy boolean
 `"subagents": true` remains readable and enables every provider, but new
-configuration should use the explicit object form.
+configuration should use the explicit object form. On Linux, Codex probes whether
+`unshare -Ur true` is available before starting a sandboxed turn. Keep
+`sandboxFallback` as `"fail"` (the default; legacy `false` is equivalent) to reject unavailable OS sandboxes,
+or set it to `"worktree-embedded"` to allow Codex to run without an OS sandbox
+only inside the configured managed worktree root. Fallback runs are marked with
+metadata and a warning; they do not extend beyond that worktree boundary.
 
 `devspace agents targets` shows usable providers and profiles for the current
 workspace. Add `--json` for a compact list of exact target names and their

@@ -21,6 +21,7 @@ export function updateOnboardingSubagentsConfig(current, selectedProviders) {
     const selected = new Set(selectedProviders);
     return {
         enabled: true,
+        sandboxFallback: current.sandboxFallback ?? "fail",
         providers: LOCAL_AGENT_PROVIDERS
             .filter((id) => selected.has(id) || current.providers.some((provider) => provider.id === id))
             .map((id) => {
