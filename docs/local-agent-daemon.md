@@ -56,7 +56,8 @@ cleanup problems:
 
 ```bash
 devspace agents daemon status
-devspace agents daemon stop
+devspace agents daemon stop                 # drain, then stop when idle
+devspace agents daemon stop --force         # stop immediately
 devspace agents daemon logs
 ```
 
@@ -81,11 +82,18 @@ devspace agents daemon status
 ```
 
 The JSON observation from `show` exposes `metadata.sandbox` and
-`metadata.warnings`. Daemon status includes the daemon build `version`, the
+`metadata.warnings`. Once a session has used the unsandboxed fallback, the
+observation also retains `previouslyUnsandboxed: true` and `lastUnsandboxedAt`
+across later sandboxed turns and errors. Daemon status includes the daemon build `version`, the
 effective `sandboxFallback`, and `sandboxProbe` with `outcome` (`ok`, `denied`,
 `indeterminate`, or `unknown`) and its ISO timestamp. Plain-text `show` output
 does not print metadata generally; fallback warning lines are appended when
-warnings are present.
+warnings are present, along with the sticky exposure marker when it is set.
+
+The daemon build reports `1.0.8-r13`. An older daemon is not stopped
+automatically during a protocol upgrade: drain and stop it with its matching
+CLI, then retry the new command. A normal `daemon stop` is non-forceful; use
+`--force` only when immediate shutdown is intentional.
 
 Agent identity is explicit at the client boundary. `agents run` starts a new
 logical agent from a profile or provider; `agents continue <id>` continues an

@@ -185,11 +185,11 @@ configuration should use the explicit object form.
 ### Codex sandbox fallback
 
 On Linux, Codex runs the probe command `unshare -Ur true` before a sandboxed
-turn. The probe is asynchronous, classifies results as `ok`, `denied` (the
-command ran but user namespaces were refused), or `indeterminate` (for
-example, `unshare` is missing, the probe timed out, or it could not be
-started). Results are cached for 60 seconds and concurrent callers share one
-in-flight probe. A denied probe is not the same as an indeterminate probe:
+turn. The asynchronous probe is `denied` only when the command exits 1 and
+stderr contains `Operation not permitted` or `EPERM`; every other exit,
+signal, timeout, missing executable, or spawn failure is `indeterminate` (and
+is rejected). Results are cached for 60 seconds and concurrent callers share
+one in-flight probe. A denied probe is not the same as an indeterminate probe:
 indeterminate results are always rejected and never authorize fallback.
 
 Keep `sandboxFallback` as `"fail"` (the default; legacy `false` is equivalent)
@@ -205,9 +205,13 @@ the starting directory; it does not confine execution. A rename race can also
 produce a TOCTOU gap between the check and provider execution. Use this mode
 for trusted workloads only.
 
+Restoring user namespaces (or the related sysctl) is not recovery from a
+compromised fallback run; treat credentials accessible to the daemon account as
+exposed.
+
 To roll back to r10, first remove `subagents.sandboxFallback` from
 `config.json`, then reinstall r10: r10's strict schema rejects that key.
-Migration 7 is additive; keep the existing SQLite file.
+Migrations 7 and 8 are additive; keep the existing SQLite file.
 
 `devspace agents targets` shows usable providers and profiles for the current
 workspace. Add `--json` for a compact list of exact target names and their

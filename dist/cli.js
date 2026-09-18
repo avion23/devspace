@@ -336,7 +336,7 @@ function printHelp() {
         "  devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] <prompt>",
         "  devspace agents continue <id> [--model <model>] [--effort <level>] <prompt>",
         "  devspace agents show <id>",
-        "  devspace agents daemon <status|stop|logs>",
+        "  devspace agents daemon <status|stop|logs> [--force]",
         "  devspace -v, --version   Print the installed version",
         "",
         "For temporary tunnels:",
@@ -481,12 +481,12 @@ async function runAgentsShow(args, json) {
 }
 async function runAgentsDaemon(args, json) {
     const [subcommand, ...extra] = args;
-    if (extra.length > 0)
-        throw new Error("Usage: devspace agents daemon <status|stop|logs> [--json]");
     const config = loadConfig();
     const client = createLocalAgentClient(config);
     switch (subcommand) {
         case "status": {
+            if (extra.length > 0)
+                throw new Error("Usage: devspace agents daemon status [--json]");
             const status = presentAgentResult(await client.status(), json);
             if (!status)
                 return;
@@ -494,7 +494,10 @@ async function runAgentsDaemon(args, json) {
             return;
         }
         case "stop": {
-            const status = presentAgentResult(await client.stop(), json);
+            const force = extra.length === 1 && extra[0] === "--force";
+            if (extra.length > 0 && !force)
+                throw new Error("Usage: devspace agents daemon stop [--force] [--json]");
+            const status = presentAgentResult(await client.stop(force), json);
             if (!status)
                 return;
             if (json)
@@ -504,6 +507,8 @@ async function runAgentsDaemon(args, json) {
             return;
         }
         case "logs": {
+            if (extra.length > 0)
+                throw new Error("Usage: devspace agents daemon logs [--json]");
             const logs = presentAgentResult(await client.logs(), json);
             if (logs === undefined)
                 return;
@@ -514,7 +519,7 @@ async function runAgentsDaemon(args, json) {
             return;
         }
         default:
-            throw new Error("Usage: devspace agents daemon <status|stop|logs>");
+            throw new Error("Usage: devspace agents daemon <status|stop|logs> [--force]");
     }
 }
 function extractJsonOption(args) {
@@ -561,7 +566,9 @@ function printAgentsHelp() {
         "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
         "  devspace agents show <id> [--json]",
         "  devspace agents targets [--json]",
-        "  devspace agents daemon <status|stop|logs> [--json]",
+        "  devspace agents daemon status [--json]",
+        "  devspace agents daemon stop [--force] [--json]",
+        "  devspace agents daemon logs [--json]",
     ].join("\n"));
 }
 function printVersion() {

@@ -33,15 +33,17 @@ export function presentAgentObservation(record) {
             return {
                 ...receipt,
                 status: "completed",
+                ...presentAgentExposure(record),
                 ...(record.latestResponse === undefined ? {} : { response: record.latestResponse }),
                 ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
             };
         case "failed":
-            return { ...receipt, status: "failed", error: presentAgentFailure(record), ...(record.metadata === undefined ? {} : { metadata: record.metadata }) };
+            return { ...receipt, status: "failed", ...presentAgentExposure(record), error: presentAgentFailure(record), ...(record.metadata === undefined ? {} : { metadata: record.metadata }) };
         case "stopped":
             return {
                 ...receipt,
                 status: "stopped",
+                ...presentAgentExposure(record),
                 ...(hasAgentFailure(record) ? { error: presentAgentFailure(record) } : {}),
                 ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
             };
@@ -49,6 +51,7 @@ export function presentAgentObservation(record) {
             return {
                 id: receipt.id,
                 status: "running",
+                ...presentAgentExposure(record),
                 ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
             };
     }
@@ -75,15 +78,15 @@ export function formatAgentSummary(summary) {
 }
 export function formatAgentObservation(observation) {
     const line = formatAgentReceipt(observation);
-    const warnings = formatAgentWarnings(observation.metadata);
+    const notices = [formatAgentWarnings(observation.metadata), formatAgentExposure(observation)].filter(Boolean).join("\n");
     if (observation.status === "completed" && observation.response !== undefined) {
-        return `${line}\n\n${observation.response}${warnings ? `\n\n${warnings}` : ""}`;
+        return `${line}\n\n${observation.response}${notices ? `\n\n${notices}` : ""}`;
     }
     if ((observation.status === "failed" || observation.status === "stopped") && observation.error) {
         const retryable = observation.error.retryable ? " [retryable]" : "";
-        return `${line} ${observation.error.code}: ${observation.error.message}${retryable}${warnings ? `\n${warnings}` : ""}`;
+        return `${line} ${observation.error.code}: ${observation.error.message}${retryable}${notices ? `\n${notices}` : ""}`;
     }
-    return warnings ? `${line}\n${warnings}` : line;
+    return notices ? `${line}\n${notices}` : line;
 }
 function presentAgentStatus(status) {
     switch (status) {
@@ -117,4 +120,17 @@ function formatAgentWarnings(metadata) {
         ? metadata.warnings.filter((warning) => typeof warning === "string" && warning.length > 0)
         : [];
     return warnings.map((warning) => `Warning: ${warning}`).join("\n");
+}
+function presentAgentExposure(record) {
+    if (record.previouslyUnsandboxed !== true)
+        return {};
+    return {
+        previouslyUnsandboxed: true,
+        ...(record.lastUnsandboxedAt === undefined ? {} : { lastUnsandboxedAt: record.lastUnsandboxedAt }),
+    };
+}
+function formatAgentExposure(observation) {
+    if (observation.previouslyUnsandboxed !== true)
+        return "";
+    return `Warning: previouslyUnsandboxed=true; lastUnsandboxedAt=${observation.lastUnsandboxedAt ?? "unknown"}.`;
 }

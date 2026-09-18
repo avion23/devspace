@@ -120,9 +120,11 @@ export class LocalAgentStore {
           error_stage = ?,
           error_detail = ?,
           error_fallback_available = ?,
+          previously_unsandboxed = ?,
+          last_unsandboxed_at = ?,
           updated_at = ?
          where id = ?`)
-            .run(updated.workspaceId ?? null, resolve(updated.workspaceRoot), updated.profileName, updated.provider, updated.model ?? null, updated.effort ?? null, updated.providerSessionId ?? null, updated.status, updated.latestResponse ?? null, updated.error ?? null, updated.errorCode ?? null, updated.errorRetryable === undefined ? null : String(updated.errorRetryable), updated.metadata === undefined ? null : JSON.stringify(updated.metadata), updated.errorBackend ?? null, updated.errorStage ?? null, updated.errorDetail ?? null, updated.errorFallbackAvailable === undefined ? null : String(updated.errorFallbackAvailable), updated.updatedAt, updated.id);
+            .run(updated.workspaceId ?? null, resolve(updated.workspaceRoot), updated.profileName, updated.provider, updated.model ?? null, updated.effort ?? null, updated.providerSessionId ?? null, updated.status, updated.latestResponse ?? null, updated.error ?? null, updated.errorCode ?? null, updated.errorRetryable === undefined ? null : String(updated.errorRetryable), updated.metadata === undefined ? null : JSON.stringify(updated.metadata), updated.errorBackend ?? null, updated.errorStage ?? null, updated.errorDetail ?? null, updated.errorFallbackAvailable === undefined ? null : String(updated.errorFallbackAvailable), updated.previouslyUnsandboxed === undefined ? null : String(updated.previouslyUnsandboxed), updated.lastUnsandboxedAt ?? null, updated.updatedAt, updated.id);
         return updated;
     }
     updateResult(id, patch) {
@@ -167,6 +169,8 @@ function rowToLocalAgentRecord(row) {
         errorStage: row.error_stage ?? undefined,
         errorDetail: row.error_detail ?? undefined,
         errorFallbackAvailable: readOptionalBoolean(row.error_fallback_available),
+        previouslyUnsandboxed: readOptionalBoolean(row.previously_unsandboxed),
+        lastUnsandboxedAt: row.last_unsandboxed_at ?? undefined,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     };

@@ -121,6 +121,8 @@ export function decodeAgentRecord(value) {
         errorStage: optionalString(record?.errorStage),
         errorDetail: optionalString(record?.errorDetail),
         errorFallbackAvailable: optionalBoolean(record?.errorFallbackAvailable),
+        previouslyUnsandboxed: optionalBoolean(record?.previouslyUnsandboxed),
+        lastUnsandboxedAt: optionalString(record?.lastUnsandboxedAt),
         createdAt: requiredString(record?.createdAt, "createdAt"),
         updatedAt: requiredString(record?.updatedAt, "updatedAt"),
     };

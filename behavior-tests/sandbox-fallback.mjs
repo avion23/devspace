@@ -84,8 +84,16 @@ async function probeCases() {
   assert.equal(calls, 1);
 
   resetSandboxProbeCache();
-  const deniedResult = await probeLinuxUserNamespace((_, __, ___, callback) => callback({ code: 17 }), { ttlMs: 60_000 });
-  assert.deepEqual(deniedResult, { outcome: "denied", code: 17 });
+  const deniedResult = await probeLinuxUserNamespace((_, __, ___, callback) => callback({ code: 1 }, "", "unshare: unshare failed: Operation not permitted\n"), { ttlMs: 60_000 });
+  assert.deepEqual(deniedResult, { outcome: "denied", code: 1, stderr: "unshare: unshare failed: Operation not permitted\n" });
+
+  resetSandboxProbeCache();
+  const wrongExit = await probeLinuxUserNamespace((_, __, ___, callback) => callback({ code: 17 }), { ttlMs: 60_000 });
+  assert.deepEqual(wrongExit, { outcome: "indeterminate", reason: "exit 17" });
+
+  resetSandboxProbeCache();
+  const killed = await probeLinuxUserNamespace((_, __, ___, callback) => callback({ signal: "SIGKILL" }), { ttlMs: 60_000 });
+  assert.deepEqual(killed, { outcome: "indeterminate", reason: "signal SIGKILL" });
 
   resetSandboxProbeCache();
   const notFound = await probeLinuxUserNamespace((_, __, ___, callback) => callback({ code: "ENOENT" }), { ttlMs: 60_000 });
@@ -99,17 +107,21 @@ async function probeCases() {
   let now = 0;
   let hostRepaired = false;
   calls = 0;
-  const ttlProbe = await probeLinuxUserNamespace((_, __, ___, callback) => {
+  const ttlExec = (_, __, ___, callback) => {
     calls += 1;
-    callback(hostRepaired ? null : { code: 1 });
-  }, { ttlMs: 60, now: () => now });
+    callback(hostRepaired ? null : { code: 1 }, "", hostRepaired ? "" : "Operation not permitted");
+  };
+  const ttlProbe = await probeLinuxUserNamespace(ttlExec, { ttlMs: 60, now: () => now });
   assert.equal(ttlProbe.outcome, "denied");
+  const measuredAt = getLinuxSandboxProbeState().at;
+  now = 30;
+  const cached = await probeLinuxUserNamespace(ttlExec, { ttlMs: 60, now: () => now });
+  assert.equal(cached.outcome, "denied");
+  assert.equal(getLinuxSandboxProbeState().at, measuredAt, "cache reuse must not look like a fresh measurement");
+  assert.equal(calls, 1, "a stable implementation must reuse an unexpired result");
   hostRepaired = true;
   now = 61;
-  const repaired = await probeLinuxUserNamespace((_, __, ___, callback) => {
-    calls += 1;
-    callback(null);
-  }, { ttlMs: 60, now: () => now });
+  const repaired = await probeLinuxUserNamespace(ttlExec, { ttlMs: 60, now: () => now });
   assert.equal(repaired.outcome, "ok");
   assert.equal(calls, 2, "expired denial must be re-probed after host repair");
 
@@ -117,7 +129,7 @@ async function probeCases() {
   calls = 0;
   const dedupProbe = (_, __, ___, callback) => {
     calls += 1;
-    setTimeout(() => callback({ code: 1 }), 5);
+    setTimeout(() => callback({ code: 1 }, "", "Operation not permitted"), 5);
   };
   const deduped = await Promise.all(Array.from({ length: 5 }, () => probeLinuxUserNamespace(dedupProbe, { ttlMs: 60_000 })));
   assert.equal(calls, 1, "concurrent callers must share one probe");
@@ -138,6 +150,13 @@ async function sandboxDecisionCases() {
   assert.match(blockedError.detail, /set subagents\.sandboxFallback to "worktree-embedded"/);
   assert.match(blockedError.detail, /after host fixes run: devspace agents daemon stop/);
   assert.equal(blockedCalls.length, 0, "sandbox failure must happen before a provider turn");
+
+  const stderrBlocked = await fakeRuntime({
+    sandboxFallback: "fail",
+    worktreeRoot: root,
+    sandboxProbe: () => ({ outcome: "denied", code: 1, stderr: "unshare: Operation not permitted\n" }),
+  }, []).run(input);
+  assert.match(assertSandboxError(stderrBlocked).detail, /Operation not permitted/);
 
   const fallbackCalls = [];
   const fallbackWarnings = [];
@@ -236,6 +255,7 @@ async function errorAndMetadataCases() {
   const gate = new Promise((resolve) => { release = resolve; });
   const warning = "Codex is running WITHOUT an OS sandbox.";
   const metadata = { sandbox: "worktree-embedded", warnings: [warning], reviewer: "kept" };
+  let runCount = 0;
   const store = {
     getByIdResult: () => Result.ok(stored),
     updateResult: (_id, patch) => {
@@ -248,9 +268,15 @@ async function errorAndMetadataCases() {
   const pool = {
     size: 0,
     run: async (_driver, _context, _input, callbacks) => {
-      await callbacks.onSandboxFallback({ sandbox: metadata.sandbox, warning, metadata });
-      await gate;
-      return Result.err(error);
+      runCount += 1;
+      if (runCount === 1) {
+        await callbacks.onSandboxFallback({ sandbox: metadata.sandbox, warning, metadata });
+        await gate;
+        return Result.err(error);
+      }
+      if (runCount === 2)
+        return Result.ok({ providerSessionId: "thread-sandboxed", finalResponse: "sandboxed response" });
+      throw new Error("provider callback exploded");
     },
     close: async () => undefined,
     evictIdle: async () => undefined,
@@ -270,23 +296,56 @@ async function errorAndMetadataCases() {
     await new Promise((resolve) => setTimeout(resolve, 1));
   const runningObservation = presentAgentObservation(stored);
   assert.deepEqual(runningObservation.metadata, metadata);
+  assert.equal(runningObservation.previouslyUnsandboxed, true);
+  assert.equal(typeof runningObservation.lastUnsandboxedAt, "string");
   assert.match(formatAgentObservation(runningObservation), /Warning: Codex is running WITHOUT an OS sandbox\./);
+  assert.match(formatAgentObservation(runningObservation), /previouslyUnsandboxed=true/);
   release();
   for (let attempt = 0; attempt < 100 && manager.activeTurnCount > 0; attempt += 1)
     await new Promise((resolve) => setTimeout(resolve, 1));
   assert.deepEqual(stored.metadata, metadata, "failed fallback metadata must remain on the error record");
   const failedObservation = presentAgentObservation(stored);
   assert.deepEqual(failedObservation.metadata, metadata);
+  assert.equal(failedObservation.previouslyUnsandboxed, true, "fallback exposure must survive provider errors");
+  const lastUnsandboxedAt = failedObservation.lastUnsandboxedAt;
   assert.match(formatAgentObservation(failedObservation), /Warning: Codex is running WITHOUT an OS sandbox\./);
+
+  const sandboxed = manager.begin(stored, "sandboxed", { writeMode: "allowed" });
+  assert.equal(sandboxed.isOk(), true);
+  for (let attempt = 0; attempt < 100 && manager.activeTurnCount > 0; attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(stored.metadata, undefined, "sandboxed turns replace current-turn fallback metadata");
+  assert.equal(stored.previouslyUnsandboxed, true, "sandboxed turns must not clear sticky exposure");
+  assert.equal(stored.lastUnsandboxedAt, lastUnsandboxedAt);
+  const sandboxedObservation = presentAgentObservation(stored);
+  assert.equal(sandboxedObservation.previouslyUnsandboxed, true);
+  assert.equal(sandboxedObservation.lastUnsandboxedAt, lastUnsandboxedAt);
+  assert.match(formatAgentObservation(sandboxedObservation), /previouslyUnsandboxed=true/);
+
+  const internalFailure = manager.begin(stored, "internal error", { writeMode: "allowed" });
+  assert.equal(internalFailure.isOk(), true);
+  for (let attempt = 0; attempt < 100 && manager.activeTurnCount > 0; attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(stored.status, "error");
+  assert.equal(stored.previouslyUnsandboxed, true, "internal errors must not clear sticky exposure");
+  assert.equal(stored.lastUnsandboxedAt, lastUnsandboxedAt);
 
   const tempState = tempDir("devspace-store-");
   const localStore = new LocalAgentStore(tempState);
   const record = localStore.create({ workspaceRoot: tempState, profileName: "codex", provider: "codex" });
   const unknownMetadata = { sandbox: "worktree-embedded", warnings: ["w"], unknown: { keep: true } };
-  localStore.update(record.id, { metadata: unknownMetadata });
+  localStore.update(record.id, {
+    metadata: unknownMetadata,
+    previouslyUnsandboxed: true,
+    lastUnsandboxedAt: "2026-01-01T00:00:01.000Z",
+  });
   assert.deepEqual(localStore.getById(record.id).metadata, unknownMetadata);
+  assert.equal(localStore.getById(record.id).previouslyUnsandboxed, true);
+  assert.equal(localStore.getById(record.id).lastUnsandboxedAt, "2026-01-01T00:00:01.000Z");
   const decoded = decodeAgentRecord({ ...localStore.getById(record.id), metadata: { unknown: "preserve", nested: { yes: true } } });
   assert.deepEqual(decoded.metadata, { unknown: "preserve", nested: { yes: true } });
+  assert.equal(decoded.previouslyUnsandboxed, true);
+  assert.equal(decoded.lastUnsandboxedAt, "2026-01-01T00:00:01.000Z");
   localStore.close();
 }
 
@@ -294,11 +353,70 @@ async function stopAndStatusCases() {
   const stopRequest = { requestId: "stop-1", protocolVersion: LOCAL_AGENT_DAEMON_PROTOCOL_VERSION, authToken: "secret", method: "daemon.stop" };
   assert.equal(decodeLocalAgentDaemonRequest(stopRequest).params.force, true, "legacy stop without params remains forceful");
   assert.equal(decodeLocalAgentDaemonRequest({ ...stopRequest, params: { force: false } }).params.force, false);
+  const raceRoot = tempDir("devspace-admission-");
+  let profilesStarted = false;
+  let releaseProfiles;
+  const profilesGate = new Promise((resolve) => { releaseProfiles = resolve; });
+  let raceRecord;
+  let raceRuns = 0;
+  const raceStore = {
+    createResult: (input) => {
+      raceRecord = {
+        id: "agt_race",
+        ...input,
+        status: "starting",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      };
+      return Result.ok(raceRecord);
+    },
+    getByIdResult: () => Result.ok(raceRecord),
+    updateResult: (_id, patch) => {
+      raceRecord = { ...raceRecord, ...patch };
+      return Result.ok(raceRecord);
+    },
+    reconcileActiveRunsResult: () => Result.ok(0),
+    close: () => undefined,
+  };
+  const raceManager = new LocalAgentManager({
+    store: raceStore,
+    drivers: [{ provider: "codex", runtimeKey: () => "race", createRuntime: async () => Result.ok(undefined) }],
+    pool: {
+      size: 0,
+      run: async () => {
+        raceRuns += 1;
+        return Result.ok({ finalResponse: "must not run" });
+      },
+      close: async () => undefined,
+      evictIdle: async () => undefined,
+    },
+    loadProfiles: async () => {
+      profilesStarted = true;
+      await profilesGate;
+      return [];
+    },
+    agentDir: "/tmp",
+    logger: undefined,
+    subagents: { enabled: true, providers: [{ id: "codex", enabled: true }] },
+  });
+  const racedStart = raceManager.start({ target: "codex", prompt: "race", workspaceRoot: raceRoot, writeMode: "allowed" });
+  for (let attempt = 0; attempt < 100 && !profilesStarted; attempt += 1)
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(profilesStarted, true);
+  raceManager.stopAdmission();
+  releaseProfiles();
+  const racedResult = await racedStart;
+  assert.equal(racedResult.isErr(), true, "a start admitted before stop must be rejected before begin");
+  assert.equal(racedResult.error.code, "AGENT_CONFLICT");
+  assert.equal(raceRuns, 0, "a rejected raced start must not enter the provider pool");
+
   const stateDir = tempDir("devspace-daemon-");
   let activeTurns = 0;
+  let admissionStops = 0;
   const manager = {
     get activeTurnCount() { return activeTurns; },
     runtimeCount: 0,
+    stopAdmission: () => { admissionStops += 1; },
     evictIdle: async () => undefined,
     close: async () => undefined,
   };
@@ -306,7 +424,7 @@ async function stopAndStatusCases() {
     stateDir,
     manager,
     idleShutdownMs: 60_000,
-    buildVersion: "1.0.8-r12-test",
+    buildVersion: "1.0.8-r13-test",
     sandboxFallback: "worktree-embedded",
     getSandboxProbeState: () => ({ outcome: "denied", at: "2026-01-01T00:00:00.000Z" }),
   });
@@ -315,18 +433,19 @@ async function stopAndStatusCases() {
   const status = await client.status();
   assert.equal(status.isOk(), true);
   assert.deepEqual(status.value.sandboxProbe, { outcome: "denied", at: "2026-01-01T00:00:00.000Z" });
-  assert.equal(status.value.version, "1.0.8-r12-test");
+  assert.equal(status.value.version, "1.0.8-r13-test");
   assert.equal(status.value.sandboxFallback, "worktree-embedded");
   assert.deepEqual(decodeDaemonStatus(status.value), status.value);
 
   activeTurns = 1;
-  const busy = await client.stop(false);
+  const busy = await client.stop();
   assert.equal(busy.isErr(), true);
   assert.equal(busy.error instanceof AgentDaemonBusyError, true);
   assert.equal(daemon.status().state, "ready", "non-force stop must leave daemon alive");
   activeTurns = 0;
   const stopped = await client.stop(true);
   assert.equal(stopped.isOk(), true);
+  assert.equal(admissionStops > 0, true, "daemon stop must close manager admission before shutdown");
   for (let attempt = 0; attempt < 100 && daemon.server; attempt += 1)
     await new Promise((resolve) => setTimeout(resolve, 1));
   assert.equal(daemon.server, undefined, "force stop must stop the daemon");

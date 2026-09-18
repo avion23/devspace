@@ -84,9 +84,6 @@ export class LocalAgentRuntimePool {
             onSandboxFallback: async (event) => {
                 await inputCallbacks?.onSandboxFallback?.(event);
             },
-            onSandboxProbeState: async (state) => {
-                await inputCallbacks?.onSandboxProbeState?.(state);
-            },
         };
         const startedAt = this.now();
         try {

@@ -12,7 +12,6 @@ export function createLocalAgentDrivers(options = {}) {
             onSandboxFallback: options.onSandboxFallback,
             sandboxProbeTtlMs: options.sandboxProbeTtlMs,
             execFile: options.execFile,
-            onSandboxProbeState: options.onSandboxProbeState,
         }),
         new ClaudeLocalAgentDriver(options.claudeQueryFactory, options.env),
         new OpencodeLocalAgentDriver(options.opencodeFactory),
@@ -31,7 +30,6 @@ export function createLocalAgentAdapter(provider, options = {}) {
             onSandboxFallback: options.onSandboxFallback,
             sandboxProbeTtlMs: options.sandboxProbeTtlMs,
             execFile: options.execFile,
-            onSandboxProbeState: options.onSandboxProbeState,
         });
         case "claude": return new ClaudeLocalAgentDriver(options.claudeQueryFactory, options.env);
         case "opencode": return new OpencodeLocalAgentDriver(options.opencodeFactory);

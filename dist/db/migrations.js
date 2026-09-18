@@ -34,6 +34,11 @@ const migrations = [
         name: "local-agent-sandbox-metadata",
         up: migrateLocalAgentSandboxMetadata,
     },
+    {
+        version: 8,
+        name: "local-agent-sandbox-exposure",
+        up: migrateLocalAgentSandboxExposure,
+    },
 ];
 export function migrateDatabase(sqlite) {
     const migrate = sqlite.transaction(() => {
@@ -216,6 +221,10 @@ function migrateLocalAgentSandboxMetadata(sqlite) {
     addColumnIfMissing(sqlite, "local_agent_sessions", "error_stage", "text");
     addColumnIfMissing(sqlite, "local_agent_sessions", "error_detail", "text");
     addColumnIfMissing(sqlite, "local_agent_sessions", "error_fallback_available", "text");
+}
+function migrateLocalAgentSandboxExposure(sqlite) {
+    addColumnIfMissing(sqlite, "local_agent_sessions", "previously_unsandboxed", "text");
+    addColumnIfMissing(sqlite, "local_agent_sessions", "last_unsandboxed_at", "text");
 }
 function addColumnIfMissing(sqlite, table, column, definition) {
     const columns = sqlite.prepare(`pragma table_info(${table})`).all();

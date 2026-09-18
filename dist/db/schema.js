@@ -81,6 +81,8 @@ export const localAgentSessions = sqliteTable("local_agent_sessions", {
     errorStage: text("error_stage"),
     errorDetail: text("error_detail"),
     errorFallbackAvailable: text("error_fallback_available"),
+    previouslyUnsandboxed: text("previously_unsandboxed"),
+    lastUnsandboxedAt: text("last_unsandboxed_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
 }, (table) => [

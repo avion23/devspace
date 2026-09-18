@@ -54,10 +54,13 @@ export function parseCodexVersion(output) {
 export const sandboxProbeTtlMs = 60_000;
 const LINUX_SANDBOX_PROBE_TIMEOUT_MS = 5_000;
 const LINUX_SANDBOX_PROBE_COMMAND = "unshare -Ur true";
+const MAX_SANDBOX_PROBE_STDERR_BYTES = 8 * 1024;
 let linuxSandboxProbeCache;
 let linuxSandboxProbeInFlight;
 let linuxSandboxProbeImplementation;
+let linuxSandboxProbeGeneration = 0;
 export function resetSandboxProbeCache() {
+    linuxSandboxProbeGeneration += 1;
     linuxSandboxProbeCache = undefined;
     linuxSandboxProbeInFlight = undefined;
     linuxSandboxProbeImplementation = undefined;
@@ -81,6 +84,7 @@ export function probeLinuxUserNamespace(execFileImpl = execFile, options = {}) {
     if (linuxSandboxProbeInFlight)
         return linuxSandboxProbeInFlight;
     linuxSandboxProbeImplementation = execFileImpl;
+    const generation = linuxSandboxProbeGeneration;
     const probe = new Promise((resolve) => {
         let settled = false;
         const finish = (result) => {
@@ -93,7 +97,7 @@ export function probeLinuxUserNamespace(execFileImpl = execFile, options = {}) {
             const child = execFileImpl("unshare", ["-Ur", "true"], {
                 timeout: LINUX_SANDBOX_PROBE_TIMEOUT_MS,
                 windowsHide: true,
-            }, (error) => finish(classifySandboxProbeError(error)));
+            }, (error, _stdout, stderr) => finish(classifySandboxProbeError(error, stderr)));
             if (child && typeof child.then === "function") {
                 child.then(() => finish({ outcome: "ok" }), (error) => finish(classifySandboxProbeError(error)));
             }
@@ -102,33 +106,62 @@ export function probeLinuxUserNamespace(execFileImpl = execFile, options = {}) {
             finish(classifySandboxProbeError(error));
         }
     });
-    linuxSandboxProbeInFlight = probe
+    const inFlight = probe
         .then((result) => {
-        linuxSandboxProbeCache = { result, at: now() };
+        if (generation === linuxSandboxProbeGeneration)
+            linuxSandboxProbeCache = { result, at: now() };
         return result;
     })
         .finally(() => {
-        linuxSandboxProbeInFlight = undefined;
+        if (linuxSandboxProbeInFlight === inFlight)
+            linuxSandboxProbeInFlight = undefined;
     });
-    return linuxSandboxProbeInFlight;
+    linuxSandboxProbeInFlight = inFlight;
+    return inFlight;
 }
 export const probeLinuxSandbox = probeLinuxUserNamespace;
-function classifySandboxProbeError(error) {
+function classifySandboxProbeError(error, stderr) {
     if (!error)
         return { outcome: "ok" };
     const code = error?.code;
     if (code === "ENOENT")
         return { outcome: "indeterminate", reason: "not_found" };
-    if (error?.killed === true || error?.timedOut === true || code === "ETIMEDOUT")
+    const signal = typeof error?.signal === "string" ? error.signal : undefined;
+    if (error?.timedOut === true || code === "ETIMEDOUT" || (error?.killed === true && (!signal || signal === "SIGTERM")))
         return { outcome: "indeterminate", reason: "timeout" };
-    if (typeof code === "number" || typeof error?.signal === "string") {
+    if (signal)
+        return { outcome: "indeterminate", reason: `signal ${signal}` };
+    if (typeof code === "number") {
+        const capturedStderr = boundedProbeStderr(error, stderr);
+        if (code === 1 && /Operation not permitted|\bEPERM\b/i.test(capturedStderr)) {
+            return {
+                outcome: "denied",
+                code,
+                ...(capturedStderr ? { stderr: capturedStderr } : {}),
+            };
+        }
         return {
-            outcome: "denied",
-            ...(code === undefined || code === null ? {} : { code }),
-            ...(typeof error.signal === "string" ? { signal: error.signal } : {}),
+            outcome: "indeterminate",
+            reason: `exit ${code}`,
         };
     }
+    if (code === "ENOENT")
+        return { outcome: "indeterminate", reason: "not_found" };
     return { outcome: "indeterminate", reason: "spawn_error" };
+}
+function boundedProbeStderr(error, stderr) {
+    const value = stderr ?? error?.stderr;
+    if (value === undefined || value === null)
+        return "";
+    const text = typeof value === "string" ? value : Buffer.isBuffer(value) ? value.toString("utf8") : String(value);
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.length <= MAX_SANDBOX_PROBE_STDERR_BYTES)
+        return text;
+    const marker = text.search(/Operation not permitted|\bEPERM\b/i);
+    const markerByte = marker < 0 ? -1 : Buffer.byteLength(text.slice(0, marker), "utf8");
+    const tailStart = bytes.length - MAX_SANDBOX_PROBE_STDERR_BYTES;
+    const start = markerByte < 0 ? tailStart : Math.min(markerByte, tailStart);
+    return bytes.subarray(start, start + MAX_SANDBOX_PROBE_STDERR_BYTES).toString("utf8");
 }
 export class CodexAppServerRuntime {
     options;
@@ -137,15 +170,8 @@ export class CodexAppServerRuntime {
     rpc;
     alive = true;
     closePromise;
-    sandboxProbeState = { outcome: "unknown", at: new Date().toISOString() };
     constructor(options) {
-        this.options = {
-            ...options,
-            onSandboxProbeState: (state) => {
-                this.sandboxProbeState = state;
-                options.onSandboxProbeState?.(state);
-            },
-        };
+        this.options = options;
         this.child = spawn(options.command, ["app-server"], {
             env: options.env,
             stdio: ["pipe", "pipe", "pipe"],
@@ -194,10 +220,6 @@ export class CodexAppServerRuntime {
                         catch {
                             // Logging must never prevent a validated fallback from running.
                         }
-                    },
-                    onSandboxProbeState: (state) => {
-                        this.options.onSandboxProbeState?.(state);
-                        callbacks?.onSandboxProbeState?.(state);
                     },
                 });
                 const providerInput = sandbox.workspaceRoot
@@ -261,9 +283,6 @@ export class CodexAppServerRuntime {
     isAlive() {
         return this.alive && !this.child.killed && this.child.exitCode === null;
     }
-    getSandboxProbeState() {
-        return this.sandboxProbeState;
-    }
     async close() {
         if (this.closePromise)
             return this.closePromise;
@@ -309,10 +328,8 @@ export class CodexLocalAgentDriver {
     worktreeRoot;
     sandboxProbe;
     onSandboxFallback;
-    onSandboxProbeState;
     sandboxProbeTtlMs;
     execFile;
-    sandboxProbeState = { outcome: "unknown", at: new Date().toISOString() };
     constructor(env = process.env, commandResolver = resolveCodexCommand, options = {}) {
         this.env = env;
         this.commandResolver = commandResolver;
@@ -322,10 +339,6 @@ export class CodexLocalAgentDriver {
         this.onSandboxFallback = options.onSandboxFallback;
         this.sandboxProbeTtlMs = options.sandboxProbeTtlMs;
         this.execFile = options.execFile;
-        this.onSandboxProbeState = (state) => {
-            this.sandboxProbeState = state;
-            options.onSandboxProbeState?.(state);
-        };
     }
     runtimeKey(_context) {
         const command = this.resolveCommand();
@@ -367,7 +380,6 @@ export class CodexLocalAgentDriver {
                     onSandboxFallback: this.onSandboxFallback,
                     sandboxProbeTtlMs: this.sandboxProbeTtlMs,
                     execFile: this.execFile,
-                    onSandboxProbeState: this.onSandboxProbeState,
                 });
                 try {
                     await runtime.initialize();
@@ -393,12 +405,6 @@ export class CodexLocalAgentDriver {
             this.commandResolved = true;
         }
         return this.resolvedCommand;
-    }
-    getSandboxProbeState() {
-        return this.sandboxProbeState;
-    }
-    get cachedSandboxProbeState() {
-        return this.sandboxProbeState;
     }
 }
 const MAX_TURN_ITEMS = 10_000;
@@ -594,7 +600,6 @@ export async function resolveCodexSandbox(input, options = {}) {
     catch (cause) {
         probe = classifySandboxProbeError(cause);
     }
-    options.onSandboxProbeState?.({ outcome: probe.outcome, at: new Date().toISOString() });
     if (probe.outcome === "ok")
         return normal;
     if (probe.outcome === "indeterminate") {
@@ -668,6 +673,7 @@ function normalizeSandboxProbe(value) {
             ...(value.reason === undefined ? {} : { reason: value.reason }),
             ...(value.code === undefined ? {} : { code: value.code }),
             ...(value.signal === undefined ? {} : { signal: value.signal }),
+            ...(value.stderr === undefined ? {} : { stderr: boundedProbeStderr({}, value.stderr) }),
         };
     }
     return { outcome: "indeterminate", reason: "spawn_error" };
@@ -679,13 +685,17 @@ function indeterminateProbeDetail(probe) {
         case "timeout":
             return `Linux user namespace probe timed out after ${LINUX_SANDBOX_PROBE_TIMEOUT_MS}ms (probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
         default:
+            if (probe.reason?.startsWith("exit ") || probe.reason?.startsWith("signal ")) {
+                return `Linux user namespace probe failed (${probe.reason}; probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+            }
             return `Linux user namespace probe could not start (spawn error; probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
     }
 }
 function deniedProbeDetail(probe) {
     const status = probe.code === undefined ? "failed" : `exited with code ${String(probe.code)}`;
     const signal = probe.signal ? ` (signal ${probe.signal})` : "";
-    return `Linux user namespace probe denied: ${LINUX_SANDBOX_PROBE_COMMAND} ${status}${signal}. set subagents.sandboxFallback to "worktree-embedded" to permit unsandboxed execution from an eligible worktree. after host fixes run: devspace agents daemon stop`;
+    const stderr = typeof probe.stderr === "string" && probe.stderr.trim() ? ` stderr: ${JSON.stringify(probe.stderr.trim())}` : "";
+    return `Linux user namespace probe denied: ${LINUX_SANDBOX_PROBE_COMMAND} ${status}${signal}.${stderr} set subagents.sandboxFallback to "worktree-embedded" to permit unsandboxed execution from an eligible worktree. after host fixes run: devspace agents daemon stop`;
 }
 function sandboxUnavailable(fields) {
     return new AgentSandboxUnavailableError({

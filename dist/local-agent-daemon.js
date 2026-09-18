@@ -124,6 +124,8 @@ export class LocalAgentDaemon {
             return this.closePromise;
         if (!this.ownsLock && !this.server)
             return;
+        if (this.accepting)
+            this.manager.stopAdmission?.();
         this.accepting = false;
         this.stopping = true;
         if (this.idleTimer)
@@ -267,6 +269,7 @@ export class LocalAgentDaemon {
                 }
                 this.stopping = true;
                 this.accepting = false;
+                this.manager.stopAdmission?.();
                 return this.status();
             case "daemon.logs":
                 return readLocalAgentDaemonLogs(this.paths, request.params.lines);

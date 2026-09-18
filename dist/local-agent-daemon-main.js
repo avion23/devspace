@@ -2,14 +2,16 @@
 import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.js";
 import { createLocalAgentDrivers } from "./local-agent-adapters.js";
+import { getLinuxSandboxProbeState } from "./local-agent-codex.js";
 import { loadLocalAgentProfiles } from "./local-agent-profiles.js";
 import { LocalAgentDaemon, writeLocalAgentDaemonLog } from "./local-agent-daemon.js";
 import { LocalAgentDaemonAlreadyRunningError, localAgentDaemonPaths, } from "./local-agent-daemon-lifecycle.js";
 import { LocalAgentManager } from "./local-agent-manager.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
+import { FORK_REVISION } from "./fork-revision.js";
 const config = loadConfig();
-const daemonBuildVersion = readPackageVersion();
+const daemonBuildVersion = `${readPackageVersion()}-${FORK_REVISION}`;
 const DEFAULT_DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 const paths = localAgentDaemonPaths(config.stateDir);
 const log = (level, event, fields) => writeLocalAgentDaemonLog(paths, level, event, fields);
@@ -19,7 +21,6 @@ const drivers = createLocalAgentDrivers({
     worktreeRoot: config.worktreeRoot,
     onSandboxFallback: (fields) => log("warn", "codex_sandbox_fallback", fields),
 });
-const codexDriver = drivers.find((driver) => driver.provider === "codex");
 const manager = new LocalAgentManager({
     store,
     drivers,
@@ -43,7 +44,7 @@ const daemon = new LocalAgentDaemon({
     idleShutdownMs: parseIdleShutdownMs(process.env.DEVSPACE_AGENTD_IDLE_TIMEOUT_MS),
     buildVersion: daemonBuildVersion,
     sandboxFallback: config.subagents.sandboxFallback,
-    getSandboxProbeState: () => codexDriver?.getSandboxProbeState?.(),
+    getSandboxProbeState: getLinuxSandboxProbeState,
 });
 let shuttingDown = false;
 const shutdown = () => {
