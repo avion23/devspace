@@ -249,3 +249,16 @@ assert.equal(autoSandbox.sandboxPolicy.type, "readOnly");
 await manager.close();
 await profileManager.close();
 console.log("model policy behavior: ok");
+
+// Full-access mode records the same unsandboxed audit trail the fallback path does.
+{
+  const events = [];
+  const fullAccess = await resolveCodexSandbox(
+    { prompt: "x", workspaceRoot: "/tmp/model-policy", writeMode: "read_only" },
+    { sandboxMode: "full-access", onSandboxFallback: (e) => events.push(e) },
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].sandbox, "full-access");
+  assert.match(events[0].warning, /WITHOUT an OS sandbox/);
+  assert.equal(fullAccess.metadata.sandbox, "full-access");
+}

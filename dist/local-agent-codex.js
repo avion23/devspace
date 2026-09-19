@@ -593,9 +593,25 @@ function normalCodexSandbox(input) {
 export async function resolveCodexSandbox(input, options = {}) {
     const normal = normalCodexSandbox(input);
     if (options.sandboxMode === "full-access") {
+        // Operator-explicit unsandboxed mode. Keep the same durable audit trail
+        // the sandbox-fallback path records (previouslyUnsandboxed metadata), so
+        // full-access turns are not indistinguishable from sandboxed ones.
+        const warning = "Codex is running WITHOUT an OS sandbox as the daemon account: unrestricted filesystem and network access. This is the operator-configured full-access sandbox mode for the codex provider.";
+        const metadata = {
+            sandbox: "full-access",
+            warnings: [warning],
+        };
+        await options.onSandboxFallback?.({
+            provider: "codex",
+            workspaceRoot: input.workspaceRoot,
+            sandbox: "full-access",
+            warning,
+            metadata,
+        });
         return {
             sandbox: sandboxFor("full_access"),
             sandboxPolicy: sandboxPolicyFor("full_access"),
+            metadata,
         };
     }
     if (process.platform !== "linux" || normal.sandbox === "danger-full-access")
