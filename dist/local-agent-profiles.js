@@ -2,15 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-export const LOCAL_AGENT_PROVIDERS = [
-    "codex",
-    "claude",
-    "opencode",
-    "pi",
-    "cursor",
-    "copilot",
-    "grok",
-];
+export const LOCAL_AGENT_PROVIDERS = ["codex"];
 const FRONTMATTER_DELIMITER = "---";
 const PROVIDERS = new Set(LOCAL_AGENT_PROVIDERS);
 export async function loadLocalAgentProfiles(config, workspaceRoot, options = {}) {
@@ -117,7 +109,7 @@ function readProvider(frontmatter, filePath) {
         throw new Error(`Subagent profile is missing provider: ${filePath}`);
     }
     if (!PROVIDERS.has(provider)) {
-        throw new Error(`Subagent profile provider must be codex, claude, opencode, pi, cursor, copilot, or grok: ${filePath}`);
+        throw new Error(`Subagent profile provider must be codex: ${filePath}`);
     }
     return provider;
 }

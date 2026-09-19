@@ -331,15 +331,9 @@ function unavailableCauseKind(error) {
     return undefined;
 }
 function displayProvider(provider) {
-    switch (provider) {
-        case "codex": return "Codex";
-        case "claude": return "Claude";
-        case "opencode": return "OpenCode";
-        case "pi": return "Pi";
-        case "cursor": return "Cursor";
-        case "copilot": return "Copilot";
-        case "grok": return "Grok";
-    }
+    if (provider === "codex")
+        return "Codex";
+    return provider;
 }
 function targetErrorPayload(error) {
     return {

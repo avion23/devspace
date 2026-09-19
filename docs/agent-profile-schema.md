@@ -68,38 +68,23 @@ Required built-in provider id:
 
 ```yaml
 provider: codex
-provider: claude
-provider: opencode
-provider: pi
-provider: cursor
-provider: copilot
-provider: grok
 ```
 
 Unsupported or custom providers are rejected. DevSpace maps providers to their
 native integration:
 
 - `codex`: the host-installed `codex app-server` command
-- `claude`: Claude Code SDK
-- `opencode`: OpenCode SDK
-- `pi`: the installed Pi coding-agent SDK, one in-process session per DevSpace agent
-- `cursor`: ACP
-- `copilot`: ACP
-- `grok`: Grok Build ACP (`grok agent stdio`)
 
 Codex is resolved from the user's environment rather than bundled with
 DevSpace. Run `codex login` normally before using it; set `CODEX_COMMAND` when
-the executable is not on the normal PATH. OpenCode, Cursor, and Copilot
-runtimes are started and reused by the daemon internally, while Pi is embedded
-through its Node SDK.
+the executable is not on the normal PATH.
 
 ### `model`
 
 Optional provider model id or alias.
 
 ```yaml
-model: gpt-5.4
-model: sonnet
+model: gpt-5.6-luna
 ```
 
 ### `effort`
@@ -117,12 +102,7 @@ effort: max
 
 DevSpace passes this through to providers that expose a matching control:
 
-- `claude`: SDK effort with adaptive thinking.
 - `codex`: app-server model reasoning effort.
-- `pi`: the AgentSession thinking-level control.
-- `opencode`: model variant.
-- `cursor` and `copilot`: ACP thought-level config when supported.
-- `grok`: `--reasoning-effort` on startup and xAI's ACP model metadata for resumed sessions.
 
 ### `disabled`
 

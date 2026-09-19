@@ -99,9 +99,9 @@ assert.deepEqual(
   { model: defaults.model, effort: defaults.effort },
   { model: CODEX_DEFAULT_MODEL, effort: CODEX_DEFAULT_EFFORT },
 );
-assert.deepEqual(
+assert.equal(
   resolveLocalAgentTarget("claude", [], undefined, undefined, [{ id: "claude", enabled: true }]),
-  { kind: "provider", name: "claude", provider: "claude", model: undefined, effort: undefined },
+  undefined,
 );
 
 const catalogProviders = buildLocalAgentProviderStatuses(
@@ -109,14 +109,10 @@ const catalogProviders = buildLocalAgentProviderStatuses(
     enabled: true,
     providers: [
       { id: "codex", enabled: true },
-      { id: "claude", enabled: true },
-      { id: "grok", enabled: true },
     ],
   },
   [
     { name: "codex", available: true },
-    { name: "claude", available: true },
-    { name: "grok", available: true },
   ],
 );
 assert.deepEqual(
@@ -132,8 +128,7 @@ assert.deepEqual(
     note: undefined,
   },
 );
-assert.equal(catalogProviders.find((provider) => provider.id === "claude").model, undefined);
-assert.equal(catalogProviders.find((provider) => provider.id === "grok").effort, undefined);
+assert.equal(catalogProviders.length, 1);
 const catalog = buildLocalAgentCatalog(
   { enabled: true, providers: catalogProviders },
   [

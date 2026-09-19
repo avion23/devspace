@@ -159,17 +159,6 @@ Enable providers and set their defaults in `~/.devspace/config.json`:
         "enabled": true,
         "model": "gpt-5.6-luna",
         "effort": "max"
-      },
-      {
-        "id": "claude",
-        "enabled": true,
-        "model": "sonnet"
-      },
-      {
-        "id": "grok",
-        "enabled": true,
-        "model": "grok-4.5",
-        "effort": "low"
       }
     ]
   }
@@ -245,14 +234,6 @@ workspace. Add `--json` for a compact list of exact target names and their
 selection metadata. Disabled, unavailable, and unconfigured providers are
 omitted. Provider availability is runtime state and never rewrites the
 configuration.
-
-Grok Build is discovered from the `grok` executable. Authenticate it with
-`grok login` or `XAI_API_KEY`; DevSpace does not read or store Grok credentials.
-Grok supports `grok-build` by default and validates explicit model and effort
-values against the ACP session metadata when available. Set `GROK_COMMAND` when
-the executable is not on the normal PATH. If your Grok installation selects a
-custom agent profile, set `GROK_AGENT_PROFILE` to that profile's path; DevSpace
-passes it to `grok agent stdio` without writing to Grok's configuration.
 
 `open_workspace` returns a compact catalog containing profile names,
 descriptions, providers, and optional models/effort levels so the host model can choose an
