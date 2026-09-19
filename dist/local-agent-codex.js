@@ -8,7 +8,6 @@ import { AgentProviderExecutionError, AgentProviderProtocolError, AgentProviderU
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import { terminateProcessTree } from "./process-platform.js";
 import { resolveAllowedPath } from "./roots.js";
-import { CODEX_DEFAULT_EFFORT, CODEX_NATIVE_MAX_EFFORT, } from "./local-agent-targets.js";
 export function codexCommandEnvironment(env = process.env) {
     const next = { ...env };
     delete next.CODEX_INTERNAL_ORIGINATOR_OVERRIDE;
@@ -331,10 +330,12 @@ export class CodexLocalAgentDriver {
     onSandboxFallback;
     sandboxProbeTtlMs;
     execFile;
+    sandboxMode;
     constructor(env = process.env, commandResolver = resolveCodexCommand, options = {}) {
         this.env = env;
         this.commandResolver = commandResolver;
         this.sandboxFallback = options.sandboxFallback ?? "fail";
+        this.sandboxMode = options.sandboxMode ?? "auto";
         this.worktreeRoot = options.worktreeRoot;
         this.sandboxProbe = options.sandboxProbe;
         this.onSandboxFallback = options.onSandboxFallback;
@@ -381,6 +382,7 @@ export class CodexLocalAgentDriver {
                     onSandboxFallback: this.onSandboxFallback,
                     sandboxProbeTtlMs: this.sandboxProbeTtlMs,
                     execFile: this.execFile,
+                    sandboxMode: this.sandboxMode,
                 });
                 try {
                     await runtime.initialize();
@@ -563,11 +565,8 @@ function turnParams(input, threadId, sandbox = normalCodexSandbox(input)) {
         approvalPolicy: "never",
         sandboxPolicy: sandbox.sandboxPolicy,
         ...(input.model ? { model: input.model } : {}),
-        ...(input.effort ? { effort: mapCodexEffort(input.effort) } : {}),
+        ...(input.effort ? { effort: input.effort } : {}),
     };
-}
-export function mapCodexEffort(effort) {
-    return effort?.trim().toLowerCase() === CODEX_DEFAULT_EFFORT ? CODEX_NATIVE_MAX_EFFORT : effort;
 }
 export function sandboxFor(writeMode) {
     switch (writeMode) {
@@ -593,6 +592,12 @@ function normalCodexSandbox(input) {
 }
 export async function resolveCodexSandbox(input, options = {}) {
     const normal = normalCodexSandbox(input);
+    if (options.sandboxMode === "full-access") {
+        return {
+            sandbox: sandboxFor("full_access"),
+            sandboxPolicy: sandboxPolicyFor("full_access"),
+        };
+    }
     if (process.platform !== "linux" || normal.sandbox === "danger-full-access")
         return normal;
     let probe;

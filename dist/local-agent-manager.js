@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { Result } from "better-result";
 import { AgentConflictError, AgentScopeError, AgentTargetError, isLocalAgentError, isProgrammerDefect, } from "./local-agent-errors.js";
 import { isLocalAgentProvider, } from "./local-agent-profiles.js";
-import { isBlockedLocalAgentModel, resolveLocalAgentSettings, resolveLocalAgentTarget, } from "./local-agent-targets.js";
+import { blockedModelMessage, isBlockedLocalAgentModel, resolveLocalAgentSettings, resolveLocalAgentTarget, } from "./local-agent-targets.js";
 import { assertAllowedPath } from "./roots.js";
 import { isSubagentProviderEnabled, } from "./local-agent-config.js";
 /**
@@ -540,6 +540,6 @@ function blockedModelError(target, provider, model, operation) {
         provider: isLocalAgentProvider(provider) ? provider : undefined,
         operation,
         retryable: false,
-        message: `Model '${model}' is blocked by DevSpace policy.`,
+        message: blockedModelMessage(model),
     });
 }

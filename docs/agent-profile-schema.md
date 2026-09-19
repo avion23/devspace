@@ -106,7 +106,8 @@ model: sonnet
 
 Optional provider reasoning effort, thinking level, or model variant. If omitted,
 DevSpace lets the provider default apply. Values are provider-specific strings;
-the Codex policy name `max` is sent to app-server as native `xhigh`.
+the Codex policy `max` is passed to app-server directly (gpt-5.6 models support
+low, medium, high, xhigh, max).
 
 ```yaml
 effort: low

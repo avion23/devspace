@@ -5,6 +5,11 @@ const providerSchema = z.object({
     enabled: z.boolean(),
     model: z.string().trim().min(1).optional(),
     effort: z.string().trim().min(1).optional(),
+    /**
+     * Force every codex turn onto the unsandboxed danger-full-access path.
+     * "auto" (default) keeps the OS sandbox (bwrap) selected by write mode.
+     */
+    sandboxMode: z.enum(["auto", "full-access"]).optional(),
 }).strict();
 const subagentsSchema = z.object({
     enabled: z.boolean(),
@@ -38,6 +43,9 @@ export function resolveSubagentsConfig(value, env = process.env) {
 }
 export function subagentProviderConfig(config, provider) {
     return config.providers.find((entry) => entry.id === provider);
+}
+export function isProviderFullAccess(config, provider) {
+    return subagentProviderConfig(config, provider)?.sandboxMode === "full-access";
 }
 export function isSubagentProviderEnabled(config, provider) {
     return config.enabled && subagentProviderConfig(config, provider)?.enabled === true;

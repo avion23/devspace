@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { Result } from "better-result";
 import { buildLocalAgentCatalog, buildLocalAgentProviderStatuses } from "../dist/local-agent-catalog.js";
-import { mapCodexEffort } from "../dist/local-agent-codex.js";
+import { resolveCodexSandbox } from "../dist/local-agent-codex.js";
 import { LocalAgentManager } from "../dist/local-agent-manager.js";
 import {
   CODEX_DEFAULT_EFFORT,
   CODEX_DEFAULT_MODEL,
-  CODEX_NATIVE_MAX_EFFORT,
+  blockedModelReason,
   isBlockedLocalAgentModel,
   resolveLocalAgentTarget,
 } from "../dist/local-agent-targets.js";
@@ -75,6 +75,19 @@ for (const model of [
   const target = resolveLocalAgentTarget("codex", [], model, undefined, providerConfigs);
   assert.equal(target.model, model);
 }
+
+for (const model of ["gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4", "gpt-5", "gpt-3.5-turbo", "openai:gpt-5-4"]) {
+  assert.equal(isBlockedLocalAgentModel(model), true, model);
+  assert.equal(blockedModelReason(model), "below-minimum", model);
+}
+for (const model of ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra", "claude-sonnet-4-5", "o3", "o4-mini"]) {
+  assert.equal(isBlockedLocalAgentModel(model), false, model);
+}
+const blockedMessage = (() => {
+  let message;
+  try { blockedModelReason; } catch { /* noop */ }
+  return undefined;
+})();
 
 const explicit = resolveLocalAgentTarget("codex", [], "gpt-5.6-custom", "high", providerConfigs);
 assert.deepEqual(
@@ -225,8 +238,19 @@ assert.equal(started.isOk(), true);
 assert.equal(started.value.model, CODEX_DEFAULT_MODEL);
 assert.equal(started.value.effort, CODEX_DEFAULT_EFFORT);
 
-assert.equal(mapCodexEffort(CODEX_DEFAULT_EFFORT), CODEX_NATIVE_MAX_EFFORT);
-assert.equal(mapCodexEffort("high"), "high");
+// Effort is passed through verbatim: the app-server model catalog advertises
+// `max` as a supported reasoning level for gpt-5.6-luna (low/medium/high/xhigh/max).
+assert.equal(CODEX_DEFAULT_EFFORT, "max");
+const fullAccessSandbox = await resolveCodexSandbox(
+  { prompt: "x", workspaceRoot: "/tmp/model-policy", writeMode: "read_only" },
+  { sandboxMode: "full-access", sandboxProbe: async () => ({ outcome: "ok" }) },
+);
+assert.equal(fullAccessSandbox.sandbox, "danger-full-access");
+const autoSandbox = await resolveCodexSandbox(
+  { prompt: "x", workspaceRoot: "/tmp/model-policy", writeMode: "read_only" },
+  { sandboxMode: "auto", sandboxProbe: async () => ({ outcome: "ok" }) },
+);
+assert.equal(autoSandbox.sandboxPolicy.type, "readOnly");
 await manager.close();
 await profileManager.close();
 console.log("model policy behavior: ok");

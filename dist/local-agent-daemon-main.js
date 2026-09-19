@@ -20,6 +20,7 @@ const drivers = createLocalAgentDrivers({
     sandboxFallback: config.subagents.sandboxFallback,
     worktreeRoot: config.worktreeRoot,
     onSandboxFallback: (fields) => log("warn", "codex_sandbox_fallback", fields),
+    codexSandboxMode: config.subagents.providers.find((entry) => entry.id === "codex")?.sandboxMode ?? "auto",
 });
 const manager = new LocalAgentManager({
     store,

@@ -183,8 +183,31 @@ profile value, which wins over the provider default. The legacy boolean
 configuration should use the explicit object form.
 
 When Codex has no configured model or effort, DevSpace defaults to
-`gpt-5.6-luna` and `max`. Codex app-server receives `max` as its native
-`xhigh` reasoning effort.
+`gpt-5.6-luna` and `max`. `max` is passed to Codex app-server directly: it
+is a supported reasoning level for gpt-5.6 models (low, medium, high, xhigh,
+max). Models below gpt-5.6 and the Terra model are refused with guidance to
+use gpt-5.6 models such as `gpt-5.6-luna` with `max` thinking.
+
+### Codex sandbox mode
+
+Each provider may set `sandboxMode`. The default `auto` keeps the OS sandbox
+(bwrap) selected by the turn's write mode. Set `"full-access"` to run every
+turn for that provider without the OS sandbox layer:
+
+```json
+{
+  "subagents": {
+    "providers": [
+      { "id": "codex", "enabled": true, "sandboxMode": "full-access" }
+    ]
+  }
+}
+```
+
+`full-access` uses Codex's `danger-full-access` policy: no bwrap, no
+filesystem confinement. Use it only on hosts where the OS sandbox is broken
+or for trusted workloads; it is the operator's explicit choice, not an
+automatic fallback.
 
 ### Codex sandbox fallback
 

@@ -1,14 +1,35 @@
 import { isLocalAgentProvider, LOCAL_AGENT_PROVIDERS, } from "./local-agent-profiles.js";
 export const CODEX_DEFAULT_MODEL = "gpt-5.6-luna";
 export const CODEX_DEFAULT_EFFORT = "max";
-export const CODEX_NATIVE_MAX_EFFORT = "xhigh";
 const BLOCKED_MODEL_IDS = new Set(["gpt-5.6-terra", "gpt-5-6-terra"]);
+const MIN_GPT_MAJOR = 5;
+const MIN_GPT_MINOR = 6;
 
-export function isBlockedLocalAgentModel(model) {
+/**
+ * Returns the reason a model is refused, or undefined when it is admissible.
+ * Two rules: Terra is always blocked, and any gpt-<version> model below
+ * gpt-5.6 is blocked with guidance to use gpt-5.6 models.
+ */
+export function blockedModelReason(model) {
     if (typeof model !== "string")
-        return false;
+        return undefined;
     const modelId = model.trim().toLowerCase().split(/[/:]/).at(-1);
-    return BLOCKED_MODEL_IDS.has(modelId);
+    if (BLOCKED_MODEL_IDS.has(modelId))
+        return "blocked";
+    const match = modelId.match(/^gpt-(\d+)(?:[.-](\d+))?/);
+    if (!match)
+        return undefined;
+    const major = Number(match[1]);
+    const minor = match[2] === undefined ? 0 : Number(match[2]);
+    if (major < MIN_GPT_MAJOR || (major === MIN_GPT_MAJOR && minor < MIN_GPT_MINOR))
+        return "below-minimum";
+    return undefined;
+}
+export function isBlockedLocalAgentModel(model) {
+    return blockedModelReason(model) !== undefined;
+}
+export function blockedModelMessage(model) {
+    return `Model '${model}' is blocked by DevSpace policy. Use gpt-5.6 models, e.g. gpt-5.6-luna with max thinking.`;
 }
 export function resolveLocalAgentSettings(provider, model, effort) {
     return {
