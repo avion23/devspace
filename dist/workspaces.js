@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { mkdir, opendir, readFile, stat } from "node:fs/promises";
+import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import { createManagedWorktree } from "./git-worktrees.js";
@@ -199,7 +198,7 @@ export class WorkspaceRegistry {
         return assertAllowedPath(directory, [workspace.root]);
     }
     async openCheckoutWorkspace(path) {
-        const root = this.canonicalWorkspaceRoot(assertAllowedPath(path, this.config.allowedRoots));
+        const root = assertAllowedPath(path, this.config.allowedRoots);
         const rootStats = await ensureCheckoutWorkspaceRoot(root);
         if (!rootStats.isDirectory()) {
             throw new Error(`Workspace root must be a directory: ${path}`);
@@ -265,36 +264,7 @@ export class WorkspaceRegistry {
             assertAllowedPath(sourceRoot, this.config.allowedRoots);
             return assertAllowedPath(root, [this.config.worktreeRoot]);
         }
-        return this.canonicalWorkspaceRoot(root);
-    }
-    canonicalWorkspaceRoot(root) {
-        const lexical = assertAllowedPath(root, this.config.allowedRoots);
-        // A workspace root may itself be a symlink (allowedRoots now includes
-        // /tmp). Lexical containment is not enough: /tmp/link -> /etc passes the
-        // lexical check while all later reads realpath through the link and
-        // escape the configured roots. Canonicalize the root and re-assert
-        // against realpathed allowed roots, matching resolveAllowedPath.
-        let real;
-        try {
-            real = realpathSync(lexical);
-        }
-        catch {
-            real = lexical;
-        }
-        const canonicalRoots = [];
-        for (const allowed of this.config.allowedRoots) {
-            let allowedReal;
-            try {
-                allowedReal = realpathSync(allowed);
-            }
-            catch {
-                allowedReal = undefined;
-            }
-            canonicalRoots.push(allowed);
-            if (allowedReal && allowedReal !== allowed)
-                canonicalRoots.push(allowedReal);
-        }
-        return assertAllowedPath(real, canonicalRoots);
+        return assertAllowedPath(root, this.config.allowedRoots);
     }
     async loadInitialAgentsFiles(root) {
         const agentDir = resolve(this.config.agentDir);
