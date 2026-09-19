@@ -1,4 +1,21 @@
 import { isLocalAgentProvider, LOCAL_AGENT_PROVIDERS, } from "./local-agent-profiles.js";
+export const CODEX_DEFAULT_MODEL = "gpt-5.6-luna";
+export const CODEX_DEFAULT_EFFORT = "max";
+export const CODEX_NATIVE_MAX_EFFORT = "xhigh";
+const BLOCKED_MODEL_IDS = new Set(["gpt-5.6-terra", "gpt-5-6-terra"]);
+
+export function isBlockedLocalAgentModel(model) {
+    if (typeof model !== "string")
+        return false;
+    const modelId = model.trim().toLowerCase().split(/[/:]/).at(-1);
+    return BLOCKED_MODEL_IDS.has(modelId);
+}
+export function resolveLocalAgentSettings(provider, model, effort) {
+    return {
+        model: model ?? (provider === "codex" ? CODEX_DEFAULT_MODEL : undefined),
+        effort: effort ?? (provider === "codex" ? CODEX_DEFAULT_EFFORT : undefined),
+    };
+}
 export function parseLocalAgentRunArgs(args) {
     const parsed = parseAgentPromptArgs(args, 'Usage: devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] "<prompt>"');
     return parsed;
@@ -74,23 +91,23 @@ export function resolveLocalAgentTarget(target, profiles, modelOverride, effortO
     const profile = profiles.find((candidate) => candidate.name === target);
     if (profile) {
         const providerConfig = providerConfigs.find((entry) => entry.id === profile.provider);
+        const settings = resolveLocalAgentSettings(profile.provider, modelOverride ?? profile.model ?? providerConfig?.model, effortOverride ?? profile.effort ?? providerConfig?.effort);
         return {
             kind: "profile",
             name: profile.name,
             provider: profile.provider,
-            model: modelOverride ?? profile.model ?? providerConfig?.model,
-            effort: effortOverride ?? profile.effort ?? providerConfig?.effort,
+            ...settings,
             profile,
         };
     }
     if (isLocalAgentProvider(target)) {
         const providerConfig = providerConfigs.find((entry) => entry.id === target);
+        const settings = resolveLocalAgentSettings(target, modelOverride ?? providerConfig?.model, effortOverride ?? providerConfig?.effort);
         return {
             kind: "provider",
             name: target,
             provider: target,
-            model: modelOverride ?? providerConfig?.model,
-            effort: effortOverride ?? providerConfig?.effort,
+            ...settings,
         };
     }
     return undefined;

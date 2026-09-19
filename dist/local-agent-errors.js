@@ -110,6 +110,7 @@ export function agentErrorFromPayload(payload) {
         case "PROVIDER_DISABLED":
         case "PROVIDER_NOT_CONFIGURED":
         case "TARGET_RESOLUTION_FAILED":
+        case "MODEL_BLOCKED":
             return new AgentTargetError({
                 code: payload.code,
                 target: payload.target ?? payload.agentId ?? payload.provider ?? "unknown",

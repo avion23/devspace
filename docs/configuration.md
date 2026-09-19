@@ -157,8 +157,8 @@ Enable providers and set their defaults in `~/.devspace/config.json`:
       {
         "id": "codex",
         "enabled": true,
-        "model": "gpt-5.4",
-        "effort": "high"
+        "model": "gpt-5.6-luna",
+        "effort": "max"
       },
       {
         "id": "claude",
@@ -181,6 +181,10 @@ Each entry controls one provider. Providers omitted from the array are disabled.
 profile value, which wins over the provider default. The legacy boolean
 `"subagents": true` remains readable and enables every provider, but new
 configuration should use the explicit object form.
+
+When Codex has no configured model or effort, DevSpace defaults to
+`gpt-5.6-luna` and `max`. Codex app-server receives `max` as its native
+`xhigh` reasoning effort.
 
 ### Codex sandbox fallback
 

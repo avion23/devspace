@@ -26,7 +26,7 @@ schema: devspace-agent/v1
 name: reviewer
 description: Read-only reviewer for bugs, security risks, and missing tests.
 provider: codex
-model: gpt-5.4
+model: gpt-5.6-luna
 effort: high
 disabled: false
 ---
@@ -105,13 +105,13 @@ model: sonnet
 ### `effort`
 
 Optional provider reasoning effort, thinking level, or model variant. If omitted,
-DevSpace lets the provider default apply. Values are provider-specific
-passthrough strings; DevSpace does not translate names between harnesses.
+DevSpace lets the provider default apply. Values are provider-specific strings;
+the Codex policy name `max` is sent to app-server as native `xhigh`.
 
 ```yaml
 effort: low
 effort: high
-effort: xhigh
+effort: max
 ```
 
 DevSpace passes this through to providers that expose a matching control:

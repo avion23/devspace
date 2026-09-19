@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { Result } from "better-result";
 import { AgentConflictError, AgentScopeError, AgentTargetError, isLocalAgentError, isProgrammerDefect, } from "./local-agent-errors.js";
 import { isLocalAgentProvider, } from "./local-agent-profiles.js";
-import { resolveLocalAgentTarget, } from "./local-agent-targets.js";
+import { isBlockedLocalAgentModel, resolveLocalAgentSettings, resolveLocalAgentTarget, } from "./local-agent-targets.js";
 import { assertAllowedPath } from "./roots.js";
 import { isSubagentProviderEnabled, } from "./local-agent-config.js";
 /**
@@ -62,6 +62,8 @@ export class LocalAgentManager {
                 }));
             }
             yield* manager.providerEnabledResult(target.provider, target.name, "start");
+            if (isBlockedLocalAgentModel(target.model))
+                return Result.err(blockedModelError(target.name, target.provider, target.model, "start"));
             yield* manager.driverResult(target.provider, "start");
             yield* manager.admittingResult("start");
             const record = yield* manager.store.createResult({
@@ -88,10 +90,10 @@ export class LocalAgentManager {
                 return Result.err(agentNotFound(agentId));
             yield* manager.agentWorkspaceResult(record, scope, "continue");
             const profiles = yield* Result.await(manager.loadProfilesResult(record.workspaceRoot, record.profileName));
-            yield* manager.profileForRecordResult(record, profiles);
+            const profile = yield* manager.profileForRecordResult(record, profiles);
             yield* manager.providerEnabledResult(record.provider, record.profileName, "continue");
             yield* manager.driverResult(record.provider, "continue", agentId);
-            return manager.begin(record, prompt, overrides, scope.workspaceId, "continue");
+            return manager.begin(record, prompt, overrides, scope.workspaceId, "continue", profile);
         });
     }
     get(agentId, scope) {
@@ -144,7 +146,7 @@ export class LocalAgentManager {
         this.admitting = false;
         this.accepting = false;
     }
-    begin(record, prompt, overrides, workspaceId, operation = "continue") {
+    begin(record, prompt, overrides, workspaceId, operation = "continue", profile) {
         if (!this.admitting || !this.accepting)
             return this.admittingResult(operation, record.id);
         if (this.activeTurns.has(record.id)) {
@@ -156,10 +158,14 @@ export class LocalAgentManager {
                 message: `Agent ${record.id} already has a running turn.`,
             }));
         }
+        const providerConfig = this.subagents.providers.find((entry) => entry.id === record.provider);
+        const settings = resolveLocalAgentSettings(record.provider, overrides.model ?? record.model ?? profile?.model ?? providerConfig?.model, overrides.effort ?? record.effort ?? profile?.effort ?? providerConfig?.effort);
+        if (isBlockedLocalAgentModel(settings.model))
+            return Result.err(blockedModelError(record.profileName, record.provider, settings.model, operation));
         const updated = this.store.updateResult(record.id, {
             status: "running",
-            model: overrides.model ?? record.model,
-            effort: overrides.effort ?? record.effort,
+            model: settings.model,
+            effort: settings.effort,
             latestResponse: undefined,
             error: undefined,
             errorCode: undefined,
@@ -359,13 +365,17 @@ export class LocalAgentManager {
         }
         const body = profile?.body.trim();
         const fullPrompt = body ? `${body}\n\nTask:\n${prompt}` : prompt;
+        const providerConfig = this.subagents.providers.find((entry) => entry.id === record.provider);
+        const settings = resolveLocalAgentSettings(record.provider, record.model ?? profile?.model ?? providerConfig?.model, record.effort ?? profile?.effort ?? providerConfig?.effort);
+        if (isBlockedLocalAgentModel(settings.model))
+            return Result.err(blockedModelError(record.profileName, record.provider, settings.model, "run"));
         return Result.ok({
             prompt: fullPrompt,
             workspaceRoot: record.workspaceRoot,
             providerSessionId: record.providerSessionId,
             writeMode: overrides.writeMode ?? "allowed",
-            model: record.model ?? profile?.model,
-            effort: record.effort ?? profile?.effort,
+            model: settings.model,
+            effort: settings.effort,
             modelOverrideRequested: overrides.model !== undefined,
             effortOverrideRequested: overrides.effort !== undefined,
         });
@@ -521,5 +531,15 @@ function agentNotFound(agentId) {
         target: agentId,
         retryable: false,
         message: `Unknown subagent id: ${agentId}.`,
+    });
+}
+function blockedModelError(target, provider, model, operation) {
+    return new AgentTargetError({
+        code: "MODEL_BLOCKED",
+        target,
+        provider: isLocalAgentProvider(provider) ? provider : undefined,
+        operation,
+        retryable: false,
+        message: `Model '${model}' is blocked by DevSpace policy.`,
     });
 }

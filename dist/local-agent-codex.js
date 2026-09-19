@@ -8,6 +8,7 @@ import { AgentProviderExecutionError, AgentProviderProtocolError, AgentProviderU
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import { terminateProcessTree } from "./process-platform.js";
 import { resolveAllowedPath } from "./roots.js";
+import { CODEX_DEFAULT_EFFORT, CODEX_NATIVE_MAX_EFFORT, } from "./local-agent-targets.js";
 export function codexCommandEnvironment(env = process.env) {
     const next = { ...env };
     delete next.CODEX_INTERNAL_ORIGINATOR_OVERRIDE;
@@ -562,8 +563,11 @@ function turnParams(input, threadId, sandbox = normalCodexSandbox(input)) {
         approvalPolicy: "never",
         sandboxPolicy: sandbox.sandboxPolicy,
         ...(input.model ? { model: input.model } : {}),
-        ...(input.effort ? { effort: input.effort } : {}),
+        ...(input.effort ? { effort: mapCodexEffort(input.effort) } : {}),
     };
+}
+export function mapCodexEffort(effort) {
+    return effort?.trim().toLowerCase() === CODEX_DEFAULT_EFFORT ? CODEX_NATIVE_MAX_EFFORT : effort;
 }
 export function sandboxFor(writeMode) {
     switch (writeMode) {
