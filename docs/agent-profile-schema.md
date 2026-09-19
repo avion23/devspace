@@ -143,8 +143,8 @@ devspace agents show <id> --json
   "name": "reviewer",
   "description": "Read-only reviewer for bugs, security risks, and missing tests.",
   "provider": "codex",
-  "model": "gpt-5.4",
-  "effort": "high"
+  "model": "gpt-5.6-luna",
+  "effort": "max"
 }
 ```
 
