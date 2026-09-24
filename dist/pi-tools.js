@@ -42,7 +42,7 @@ async function runTool(execute, input, context) {
     }
 }
 export async function readFileTool(input, context) {
-    const path = resolveAllowedPath(input.path, context.cwd, context.readRoots ?? [context.root]);
+    const path = resolveAllowedPath(input.path, context.cwd, context.readRoots ?? [context.root], { followFinal: true });
     // Hotfix pending rev 8 (live-only 2026-09-05): stat inside try so missing
     // files return the upstream isError shape (via formatToolError) instead of
     // throwing MCP -32603; reject non-regular files before reading. Residual
@@ -74,7 +74,7 @@ export async function readFileTool(input, context) {
     }, context);
 }
 export async function writeFileTool(input, context) {
-    const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
+    const path = resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
     const tool = createWriteTool(context.cwd);
     return runTool((params) => tool.execute("write_file", params), {
         path,
@@ -82,7 +82,7 @@ export async function writeFileTool(input, context) {
     }, context);
 }
 export async function editFileTool(input, context) {
-    const path = resolveAllowedPath(input.path, context.cwd, [context.root]);
+    const path = resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
     const tool = createEditTool(context.cwd);
     return runTool((params) => tool.execute("edit_file", params), {
         path,
@@ -192,22 +192,25 @@ export async function movePathTool(input, context) {
     }
 }
 export async function grepFilesTool(input, context) {
-    if (input.path)
-        resolveAllowedPath(input.path, context.cwd, [context.root]);
+    const path = input.path === undefined
+        ? undefined
+        : resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
     const tool = createGrepTool(context.cwd);
-    return runTool((params) => tool.execute("grep_files", params), input, context);
+    return runTool((params) => tool.execute("grep_files", params), path === undefined ? input : { ...input, path }, context);
 }
 export async function findFilesTool(input, context) {
-    if (input.path)
-        resolveAllowedPath(input.path, context.cwd, [context.root]);
+    const path = input.path === undefined
+        ? undefined
+        : resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
     const tool = createFindTool(context.cwd);
-    return runTool((params) => tool.execute("find_files", params), input, context);
+    return runTool((params) => tool.execute("find_files", params), path === undefined ? input : { ...input, path }, context);
 }
 export async function listDirectoryTool(input, context) {
-    if (input.path)
-        resolveAllowedPath(input.path, context.cwd, [context.root]);
+    const path = input.path === undefined
+        ? undefined
+        : resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
     const tool = createLsTool(context.cwd);
-    return runTool((params) => tool.execute("list_directory", params), input, context);
+    return runTool((params) => tool.execute("list_directory", params), path === undefined ? input : { ...input, path }, context);
 }
 export async function runShellTool(input, context) {
     const tool = createBashTool(context.cwd);

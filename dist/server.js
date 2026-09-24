@@ -1735,6 +1735,9 @@ export function createServer(config = loadConfig(), options = {}) {
             sessionIdPrefix: sessionIdPrefix(sessionId),
             isInitialize: initializeRequest,
         });
+        let reservation;
+        let reservationConsumed = false;
+        let registrationRejected = false;
         try {
             let transport;
             if (sessionId) {
@@ -1788,7 +1791,21 @@ export function createServer(config = loadConfig(), options = {}) {
                         sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
                         return;
                     }
+                    reservation = transports.reserve(MAX_MCP_SESSIONS, oldestKey);
+                    if (!reservation) {
+                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
+                            requestId,
+                            currentSessions: transports.size,
+                            limit: MAX_MCP_SESSIONS,
+                            idleSeconds,
+                            ...requestLogFields(req, config),
+                        });
+                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
+                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
+                        return;
+                    }
                     const victimLastActivityAt = oldestEntry.lastActivityAt;
+                    const victimActivityVersion = oldestEntry.activityVersion;
                     // Hotfix pending rev 8 (live-only 2026-09-05): demote per-event
                     // eviction log to debug; failures stay warn (see below).
                     logEvent(config.logging, "debug", "mcp_session_evicted", {
@@ -1813,23 +1830,57 @@ export function createServer(config = loadConfig(), options = {}) {
                     // Re-validate: the victim may have become active during the close
                     // await (transports.get refreshes lastActivityAt). Skip removal then.
                     const currentVictim = transports.sessions.get(oldestKey);
-                    if (currentVictim && currentVictim.lastActivityAt !== victimLastActivityAt) {
+                    if (currentVictim &&
+                        (currentVictim.lastActivityAt !== victimLastActivityAt ||
+                            currentVictim.activityVersion !== victimActivityVersion)) {
                         logEvent(config.logging, "debug", "mcp_session_evict_skipped", {
                             requestId,
                             evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
                             idleSeconds,
                         });
+                        transports.release(reservation);
+                        reservation = undefined;
+                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
+                            requestId,
+                            currentSessions: transports.size,
+                            limit: MAX_MCP_SESSIONS,
+                            idleSeconds,
+                            ...requestLogFields(req, config),
+                        });
+                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
+                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
+                        return;
                     }
                     else {
                         // onclose may already have removed it; delete is a no-op then.
                         transports.remove(oldestKey);
                     }
                 }
+                else {
+                    reservation = transports.reserve(MAX_MCP_SESSIONS);
+                    if (!reservation) {
+                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
+                            requestId,
+                            currentSessions: transports.size,
+                            limit: MAX_MCP_SESSIONS,
+                            ...requestLogFields(req, config),
+                        });
+                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
+                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
+                        return;
+                    }
+                }
                 transport = new StreamableHTTPServerTransport({
                     sessionIdGenerator: () => randomUUID(),
                     onsessioninitialized: (newSessionId) => {
-                        if (transport)
-                            transports.register(newSessionId, transport);
+                        if (transport) {
+                            reservationConsumed = transports.register(newSessionId, transport, reservation);
+                            if (!reservationConsumed) {
+                                registrationRejected = true;
+                                void transport.close().catch(() => { });
+                                throw new Error("MCP session capacity reservation was invalidated");
+                            }
+                        }
                         logEvent(config.logging, "info", "mcp_session_created", {
                             requestId,
                             sessionIdPrefix: sessionIdPrefix(newSessionId),
@@ -1856,13 +1907,31 @@ export function createServer(config = loadConfig(), options = {}) {
             await transport.handleRequest(req, res, req.body);
         }
         catch (error) {
-            logEvent(config.logging, "error", "mcp_request_error", {
-                requestId,
-                error: error instanceof Error ? error.message : String(error),
-            });
-            if (!res.headersSent) {
-                sendJsonRpcError(res, 500, -32603, "Internal server error");
+            if (registrationRejected) {
+                logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
+                    requestId,
+                    currentSessions: transports.size,
+                    limit: MAX_MCP_SESSIONS,
+                    ...requestLogFields(req, config),
+                });
+                if (!res.headersSent) {
+                    res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
+                    sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
+                }
             }
+            else {
+                logEvent(config.logging, "error", "mcp_request_error", {
+                    requestId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                if (!res.headersSent) {
+                    sendJsonRpcError(res, 500, -32603, "Internal server error");
+                }
+            }
+        }
+        finally {
+            if (reservation && !reservationConsumed)
+                transports.release(reservation);
         }
     });
     let closePromise;

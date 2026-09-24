@@ -313,3 +313,16 @@ Each entry: file, what, why, backup, revert.
 - Validation: `behavior-tests/model-policy.mjs` (effort passthrough, version floor, sandbox mode) + rev10-conformance (17/17) + sandbox-fallback PASS on the installed tree; live MODEL_BLOCKED for gpt-5-6-terra/gpt-5.6-terra/openai-qualified/gpt-5.4/gpt-5.4-mini/gpt-4o; daemon status ready; local + public healthz 200.
 - Revert: restore the rev-13 dist fork files + `~/.devspace/config.json` (backup `~/.devspace/deploy-e199e28.TQ5P63/`), restart devspace and the agent daemon.
 - Note: two connector turns (agt_a4b42ad7, agt_724277fd) were interrupted by deploy restarts; both recorded as errors and are retryable.
+
+## 2026-09-24 (rev 15) — final-link confinement, session admission reservations, tracked behavior checks
+
+- Files: `dist/roots.js`, `dist/pi-tools.js`, `dist/mcp-sessions.js`, `dist/server.js`, `dist/fork-revision.js`, `package.json`, `README.md`, `PATCHES.md`, `behavior-tests/review-findings.mjs`.
+- What:
+  - `roots.js` adds the `followFinal` option to `resolveAllowedPath`. Read, write, and edit follow the final symlink only after canonical containment validation; grep, find, and list forward that validated canonical path. Delete and move retain leaf-symlink semantics (`lstat` and `link(2)`), so they operate on the link rather than its target.
+  - `mcp-sessions.js` tracks in-flight reservations, exposes `reserve`/`release`, consumes reservations in `register`, and increments `activityVersion` on `get()`. The server reserves before admission awaits, rejects failed reservations or re-activated eviction victims with 503, consumes the reservation at `onsessioninitialized`, and releases an unused reservation in `finally`.
+  - `package.json` makes `npm test` run the four tracked behavior suites: `behavior-tests/rev10-conformance.mjs`, `behavior-tests/sandbox-fallback.mjs`, `behavior-tests/model-policy.mjs`, and `behavior-tests/review-findings.mjs`.
+  - Bump `dist/fork-revision.js` to r15 and point the README install command at `v1.0.8-r15`.
+- Why: close final-symlink root escapes for every path-reading tool; prevent concurrent MCP initializes from exceeding the session cap or evicting a session reactivated during the admission wait; and run all tracked behavior suites by default.
+- Backups: the pre-r15 tracked state is `2a650f5`; recover any prior file with `git show 2a650f5:<path>`. No installed package, host, service, or live deployment was changed before this release.
+- Revert: revert the release merge with `git revert -m 1 <r15-merge-commit>`; for a deployed rollback, install the `v1.0.8-r13` archive and restart `devspace-serve`.
+- Applied by: operator-approved release session 2026-09-24; validated with `npm test` before tagging.
