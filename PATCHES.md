@@ -305,3 +305,15 @@ Each entry: file, what, why, backup, revert.
 - What: replace the synchronous Linux `unshare -Ur true` check with a 5-second async tri-state probe cached for 60 seconds; reject indeterminate probes, permit only explicitly configured worktree fallback for denied probes, retain fallback metadata through errors and presentation, preserve it over daemon transport, and refuse read-only fallback. Add daemon status probe/build fields, structured busy-stop handling, and older-daemon stop compatibility.
 - Validation: both standalone behavior suites pass (`sandbox fallback behavior: PASS`; rev10 `17 passed, 0 failed`); modified JavaScript files pass `node --check`.
 - Revert: restore the pre-rev12 local-agent files/docs and remove the additive behavior coverage; no live installs/services were changed.
+
+## 2026-09-24 (rev 13) — final-link confinement, session admission reservations, tracked behavior checks
+
+- Files: `dist/roots.js`, `dist/pi-tools.js`, `dist/mcp-sessions.js`, `dist/server.js`, `package.json`, `behavior-tests/review-findings.mjs`.
+- What:
+  - `roots.js` adds the `followFinal` option to `resolveAllowedPath`. Read, write, and edit follow the final symlink only after canonical containment validation; grep, find, and list forward that validated canonical path. Delete and move retain leaf-symlink semantics (`lstat` and `link(2)`), so they operate on the link rather than its target.
+  - `mcp-sessions.js` tracks in-flight reservations, exposes `reserve`/`release`, consumes reservations in `register`, and increments `activityVersion` on `get()`. The server reserves before admission awaits, rejects failed reservations or re-activated eviction victims with 503, consumes the reservation at `onsessioninitialized`, and releases an unused reservation in `finally`.
+  - `package.json` makes `npm test` run the three tracked behavior suites: `behavior-tests/rev10-conformance.mjs`, `behavior-tests/sandbox-fallback.mjs`, and `behavior-tests/review-findings.mjs`. The new review suite covers final-link confinement, leaf delete/move behavior, and concurrent session admission.
+- Why: close final-symlink root escapes for every path-reading tool, prevent concurrent MCP initializes from exceeding the session cap or evicting a session reactivated during the admission wait, and make the regression coverage part of the normal test command.
+- Backups: the pre-change tracked state is `f4897b2`; recover any prior file with `git show f4897b2:<path>`. No installed package, host, service, or live deployment was changed.
+- Revert: `git revert f8a7426` on the affected branch(es), or perform the normal branch-level rollback to the pre-fix commit; do not force-push.
+- Applied by: integration session 2026-09-24; validated with `npm test` after the documentation entry was added.
