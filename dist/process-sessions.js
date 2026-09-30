@@ -244,10 +244,8 @@ export class ProcessSessionManager {
         this.sessions.clear();
     }
     async waitForExit(session, yieldTimeMs) {
-        if (session.failure) {
-            await session.exitPromise;
+        if (session.failure)
             return;
-        }
         let timer;
         try {
             await Promise.race([
@@ -301,6 +299,11 @@ export class ProcessSessionManager {
         session.process = {
             write: (data) => child.stdin.write(data),
             kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
+            destroy: () => {
+                child.stdin.destroy();
+                child.stdout.destroy();
+                child.stderr.destroy();
+            },
             resize: input.tty ? () => undefined : undefined,
             closeStdio: () => {
                 child.stdin.destroy();
@@ -383,6 +386,11 @@ export class ProcessSessionManager {
             session.process?.kill("SIGKILL");
         }
         catch { }
+        try {
+            session.process?.destroy?.();
+        }
+        catch { }
+        this.finish(session, undefined, "SIGKILL");
     }
     throwIfFailed(session, output) {
         if (!session.failure)
