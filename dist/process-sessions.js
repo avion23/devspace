@@ -168,6 +168,7 @@ export class ProcessSessionManager {
         const snapshot = this.consume(session, input.maxOutputTokens);
         if (!session.running)
             this.removeSession(session.id);
+        this.throwIfFailed(session, snapshot.output);
         return snapshot;
     }
     async write(input) {
@@ -179,7 +180,7 @@ export class ProcessSessionManager {
             MAX_YIELD_MS);
         const chars = input.chars ?? "";
         const interactionRequested = chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
-        if (input.columns !== undefined || input.rows !== undefined) {
+        if (!session.failure && (input.columns !== undefined || input.rows !== undefined)) {
             session.columns = terminalSize(input.columns, session.columns);
             session.rows = terminalSize(input.rows, session.rows);
             if (!session.process?.resize) {
@@ -187,19 +188,26 @@ export class ProcessSessionManager {
             }
             session.process.resize(session.columns, session.rows);
         }
-        const interruptRequested = chars.includes("\u0003") && session.running;
+        const interruptRequested = chars.includes("\u0003") && session.running && !session.failure;
         if (interruptRequested) {
             this.stop(session, "SIGINT");
         }
         const writableChars = chars.replaceAll("\u0003", "");
-        if (writableChars && session.running)
-            session.process?.write(writableChars);
-        if ((interactionRequested || !session.buffer.hasOutput()) && session.running) {
+        if (writableChars && session.running && !session.failure) {
+            try {
+                session.process?.write(writableChars);
+            }
+            catch (error) {
+                this.fail(session, error);
+            }
+        }
+        if ((session.failure || interactionRequested || !session.buffer.hasOutput()) && session.running) {
             await this.waitForExit(session, yieldTimeMs);
         }
         const snapshot = this.consume(session, input.maxOutputTokens);
         if (!session.running)
             this.removeSession(session.id);
+        this.throwIfFailed(session, snapshot.output);
         return snapshot;
     }
     terminate(workspaceId, sessionId) {
@@ -236,6 +244,10 @@ export class ProcessSessionManager {
         this.sessions.clear();
     }
     async waitForExit(session, yieldTimeMs) {
+        if (session.failure) {
+            await session.exitPromise;
+            return;
+        }
         let timer;
         try {
             await Promise.race([
@@ -298,8 +310,10 @@ export class ProcessSessionManager {
         };
         child.stdout.setEncoding("utf8").on("data", (data) => this.append(session, data));
         child.stderr.setEncoding("utf8").on("data", (data) => this.append(session, data));
-        child.stdin.on("error", (error) => this.append(session, `${error.message}\n`));
-        child.on("error", (error) => this.append(session, `${error.message}\n`));
+        child.stdin.on("error", (error) => this.fail(session, error));
+        child.stdout.on("error", (error) => this.fail(session, error));
+        child.stderr.on("error", (error) => this.fail(session, error));
+        child.on("error", (error) => this.fail(session, error));
         child.on("close", (code, signal) => this.finish(session, code ?? undefined, signal ?? undefined));
         if (commandFromStdin)
             child.stdin.end(input.command);
@@ -359,6 +373,21 @@ export class ProcessSessionManager {
         session.resolveExit();
         session.cleanupTimer = setTimeout(() => this.sessions.delete(session.id), this.completedSessionTtlMs);
         session.cleanupTimer.unref();
+    }
+    fail(session, error) {
+        if (!session.running || session.failure)
+            return;
+        session.failure = error instanceof Error ? error : new Error(String(error));
+        this.append(session, `${session.failure.message}\n`);
+        try {
+            session.process?.kill("SIGKILL");
+        }
+        catch { }
+    }
+    throwIfFailed(session, output) {
+        if (!session.failure)
+            return;
+        throw new Error(`Process I/O failed: ${output || session.failure.message}`);
     }
     append(session, output) {
         session.buffer.append(output);
