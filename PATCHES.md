@@ -44,15 +44,27 @@ not a backup file on disk.
   a bounded initial yield and caps poll duration; both route through the
   shared process-session manager in `dist/process-sessions.js`.
 
-## MCP session lifecycle (`dist/server.js`, `dist/mcp-sessions.js`)
+## MCP transport (`dist/server.js`)
 
-- Sessions idle-sweep after 30 minutes (not the upstream 24h default).
-- A session cap evicts the oldest idle session on admission instead of
-  rejecting new connections with 503.
-- In-flight session reservations prevent a concurrent admission burst from
-  exceeding the cap or evicting a session reactivated mid-admission.
+- Stateless Streamable HTTP: each `POST /mcp` gets its own transport and MCP
+  server, closed when the response ends. ChatGPT opens one MCP session per
+  tool call, so durable state is keyed by `workspaceId` and process
+  `sessionId` only. `GET`/`DELETE /mcp` return 405.
+- Tool results carry the output text once, in `content`; `structuredContent`
+  holds only small typed metadata.
 - `http_response_incomplete` is logged (request id, path, status, duration;
   no bodies or credentials) when a response closes before completion.
+- `trust proxy` defaults to one hop (`DEVSPACE_TRUST_PROXY=0` disables it).
+- `serve` sets the process title `devspace-serve`, so host OOM policies that
+  match `node` do not target the server.
+
+## Process output (`dist/process-sessions.js`)
+
+- Default output budget is 3000 tokens per call (override `maxOutputTokens`,
+  max 100000). Over budget, the model gets head + tail and a marker with the
+  absolute path of the full log under `$DEVSPACE_STATE_DIR/process-logs`
+  (default `~/.local/share/devspace/process-logs`), kept 15 minutes after
+  the process exits.
 
 ## OAuth (`dist/oauth-provider.js`, `dist/server.js`)
 
@@ -85,5 +97,5 @@ profile schema reject any other value.
 ## Current fork revision
 
 `dist/fork-revision.js` holds the revision tag reported by the daemon
-(`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r17`) and installed by
+(`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r18`) and installed by
 `README.md`'s install command. Bump both together when cutting a release.

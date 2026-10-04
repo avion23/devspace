@@ -115,9 +115,9 @@ sessions.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
+| `full` | Widget UI is attached to exposed workspace, file, edit, and shell tools. |
 | `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `off` | Default. Disables widget UI. |
 
 ## Skills
 
@@ -275,7 +275,7 @@ npx @waishnav/devspace serve
 | `DEVSPACE_LOG_ASSETS` | `0` |
 | `DEVSPACE_LOG_TOOL_CALLS` | `1` |
 | `DEVSPACE_LOG_SHELL_COMMANDS` | `0` |
-| `DEVSPACE_TRUST_PROXY` | `0` |
+| `DEVSPACE_TRUST_PROXY` | `1` |
 
 Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 
@@ -291,7 +291,6 @@ DEVSPACE_PUBLIC_BASE_URL="https://devspace.example.com" \
 DEVSPACE_WORKTREE_ROOT="$HOME/.devspace/worktrees" \
 DEVSPACE_ARTIFACTS="1" \
 DEVSPACE_TOOL_MODE="minimal" \
-DEVSPACE_WIDGETS="full" \
 npx @waishnav/devspace serve
 ```
 

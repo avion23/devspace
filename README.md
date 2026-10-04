@@ -5,7 +5,7 @@ Maintained fork of [`@waishnav/devspace`](https://www.npmjs.com/package/@waishna
 ## Install
 
 ```
-npm i -g https://github.com/avion23/devspace/archive/refs/tags/v1.0.8-r17.tar.gz
+npm i -g https://github.com/avion23/devspace/archive/refs/tags/v1.0.8-r18.tar.gz
 ```
 
 ## Command and read behavior

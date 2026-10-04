@@ -401,7 +401,7 @@ function registerProcessTools(server, config, workspaces, processSessions) {
                 .positive()
                 .max(100_000)
                 .optional()
-                .describe("Approximate output token budget. Defaults to 10000."),
+                .describe("Approximate output token budget. Defaults to 3000."),
         },
         outputSchema: processOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "shell"),
@@ -463,7 +463,7 @@ function registerProcessTools(server, config, workspaces, processSessions) {
                 .positive()
                 .max(100_000)
                 .optional()
-                .describe("Approximate output token budget. Defaults to 10000."),
+                .describe("Approximate output token budget. Defaults to 3000."),
         },
         outputSchema: processOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "shell"),
