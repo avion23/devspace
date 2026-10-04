@@ -138,6 +138,12 @@ export class ProcessSessionManager {
         this.completedSessionTtlMs = options.completedSessionTtlMs ?? COMPLETED_SESSION_TTL_MS;
     }
     async start(input) {
+        // Validate before spawning: rejected limits must not leave a child behind.
+        const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_COMMAND_YIELD_MS);
+        boundedInteger(input.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
+        if (input.timeoutSeconds !== undefined && (!Number.isFinite(input.timeoutSeconds) || input.timeoutSeconds <= 0)) {
+            throw new Error("Execution timeout must be positive and finite.");
+        }
         const session = this.createSession(input);
         this.sessions.set(session.id, session);
         try {
@@ -150,7 +156,13 @@ export class ProcessSessionManager {
             this.sessions.delete(session.id);
             throw error;
         }
-        const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_COMMAND_YIELD_MS);
+        if (input.timeoutSeconds !== undefined) {
+            session.timeoutSeconds = input.timeoutSeconds;
+            session.deadlineTimer = setTimeout(() => {
+                session.timedOut = true;
+                this.stop(session, "SIGTERM");
+            }, Math.max(0, input.timeoutSeconds * 1_000 - (Date.now() - session.startedAt)));
+        }
         await this.waitForExit(session, yieldTimeMs);
         const snapshot = this.consume(session, input.maxOutputTokens);
         if (!session.running)
@@ -159,6 +171,11 @@ export class ProcessSessionManager {
     }
     async write(input) {
         const session = this.getOwnedSession(input.workspaceId, input.sessionId);
+        boundedInteger(input.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
+        const yieldTimeMs = boundedInteger(input.yieldTimeMs,
+            input.chars || input.columns !== undefined || input.rows !== undefined
+                ? DEFAULT_INTERACTIVE_YIELD_MS : DEFAULT_POLL_YIELD_MS,
+            Math.min(MAX_COMMAND_YIELD_MS, MAX_POLL_YIELD_MS));
         const chars = input.chars ?? "";
         const interactionRequested = chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
         if (input.columns !== undefined || input.rows !== undefined) {
@@ -171,15 +188,12 @@ export class ProcessSessionManager {
         }
         const interruptRequested = chars.includes("\u0003") && session.running;
         if (interruptRequested) {
-            session.process?.kill("SIGINT");
+            this.stop(session, "SIGINT");
         }
         const writableChars = chars.replaceAll("\u0003", "");
         if (writableChars && session.running)
             session.process?.write(writableChars);
         if ((interactionRequested || !session.buffer.hasOutput()) && session.running) {
-            const fallback = interactionRequested ? DEFAULT_INTERACTIVE_YIELD_MS : DEFAULT_POLL_YIELD_MS;
-            const maximum = interactionRequested ? MAX_COMMAND_YIELD_MS : MAX_POLL_YIELD_MS;
-            const yieldTimeMs = boundedInteger(input.yieldTimeMs, fallback, maximum);
             await this.waitForExit(session, yieldTimeMs);
         }
         const snapshot = this.consume(session, input.maxOutputTokens);
@@ -190,15 +204,31 @@ export class ProcessSessionManager {
     terminate(workspaceId, sessionId) {
         const session = this.getOwnedSession(workspaceId, sessionId);
         if (session.running)
-            session.process?.kill("SIGTERM");
+            this.stop(session, "SIGTERM");
     }
-    shutdown() {
-        for (const session of this.sessions.values()) {
+    stop(session, signal) {
+        session.process?.kill(signal);
+        // Escalate even if the shell exits: descendants can ignore the signal
+        // and close their pipes. Shutdown must await this tree cleanup too.
+        session.terminationPromise ??= new Promise((resolve) => {
+            setTimeout(() => {
+                session.process?.kill("SIGKILL");
+                resolve();
+            }, 1_000);
+        });
+    }
+    async shutdown() {
+        const sessions = [...this.sessions.values()];
+        for (const session of sessions) {
+            if (session.running)
+                this.stop(session, "SIGTERM");
+        }
+        await Promise.all(sessions.map(async (session) => {
+            await session.terminationPromise;
+            await session.exitPromise;
             if (session.cleanupTimer)
                 clearTimeout(session.cleanupTimer);
-            if (session.running)
-                session.process?.kill("SIGTERM");
-        }
+        }));
         this.sessions.clear();
     }
     async waitForExit(session, yieldTimeMs) {
@@ -254,6 +284,7 @@ export class ProcessSessionManager {
         };
         child.stdout.on("data", (data) => this.append(session, data.toString("utf8")));
         child.stderr.on("data", (data) => this.append(session, data.toString("utf8")));
+        child.stdin.on("error", (error) => this.append(session, `${error.message}\n`));
         child.on("error", (error) => this.append(session, `${error.message}\n`));
         child.on("close", (code, signal) => this.finish(session, code ?? undefined, signal ?? undefined));
     }
@@ -284,7 +315,7 @@ export class ProcessSessionManager {
         }
         session.process = {
             write: (data) => pty.write(data),
-            kill: (signal) => pty.kill(signal),
+            kill: (signal = "SIGTERM") => terminateProcessTree(pty, signal, true),
             resize: (columns, rows) => pty.resize(columns, rows),
         };
         pty.onData((data) => this.append(session, data));
@@ -296,6 +327,8 @@ export class ProcessSessionManager {
         if (!session.running)
             return;
         session.running = false;
+        if (session.deadlineTimer)
+            clearTimeout(session.deadlineTimer);
         session.exitCode = exitCode;
         session.signal = signal;
         session.resolveExit();
@@ -316,6 +349,8 @@ export class ProcessSessionManager {
             running: session.running,
             exitCode: session.exitCode,
             signal: session.signal,
+            timedOut: session.timedOut ?? false,
+            timeoutSeconds: session.timeoutSeconds,
             wallTimeMs: Date.now() - session.startedAt,
         };
     }
@@ -332,6 +367,11 @@ export class ProcessSessionManager {
         const session = this.sessions.get(sessionId);
         if (session?.cleanupTimer)
             clearTimeout(session.cleanupTimer);
-        this.sessions.delete(sessionId);
+        if (session?.terminationPromise) {
+            void session.terminationPromise.then(() => this.sessions.delete(sessionId));
+        }
+        else {
+            this.sessions.delete(sessionId);
+        }
     }
 }
