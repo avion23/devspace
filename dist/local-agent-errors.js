@@ -301,6 +301,9 @@ export async function captureAgentProviderResult(input) {
         return Result.err(error);
     }
 }
+export function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
+}
 export function isProgrammerDefect(error) {
     if (unavailableCauseKind(error))
         return false;

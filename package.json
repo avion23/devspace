@@ -24,52 +24,26 @@
     "access": "public"
   },
   "scripts": {
-    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && npm run build:app && tsc -p tsconfig.build.json",
-    "build:app": "vite build",
-    "dev": "node scripts/dev-server.mjs",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "start": "node dist/cli.js serve",
-    "test": "node behavior-tests/rev10-conformance.mjs && node behavior-tests/sandbox-fallback.mjs && node behavior-tests/model-policy.mjs && node behavior-tests/review-findings.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "node behavior-tests/rev10-conformance.mjs && node behavior-tests/sandbox-fallback.mjs && node behavior-tests/model-policy.mjs && node behavior-tests/review-findings.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@agentclientprotocol/sdk": "^1.1.0",
-    "@anthropic-ai/claude-agent-sdk": "^0.3.200",
-    "@anthropic-ai/sandbox-runtime": "0.0.71",
     "@clack/prompts": "^1.5.1",
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@modelcontextprotocol/ext-apps": "^1.7.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@opencode-ai/sdk": "^1.17.13",
-    "@pierre/diffs": "^1.2.5",
     "better-result": "^2.10.0",
     "better-sqlite3": "^12.10.0",
-    "cross-spawn": "^7.0.6",
     "diff": "^8.0.3",
     "drizzle-orm": "^0.45.2",
     "express": "^5.2.1",
-    "lucide": "^1.24.0",
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
     "semver": "^7.8.4",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@types/express": "^5.0.6",
-    "@types/node": "^25.9.1",
-    "@types/react": "^19.2.15",
-    "@types/react-dom": "^19.2.3",
-    "@types/semver": "^7.7.1",
-    "@vitejs/plugin-react": "^6.0.2",
-    "tsx": "^4.22.3",
-    "typescript": "^6.0.3",
-    "vite": "^8.0.14"
   },
   "overrides": {
     "protobufjs": "7.6.4",

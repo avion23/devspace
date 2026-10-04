@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Result } from "better-result";
-import { AgentProviderUnavailableError, } from "./local-agent-errors.js";
+import { AgentProviderUnavailableError, errorMessage, } from "./local-agent-errors.js";
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 60_000;
 /**
@@ -454,7 +454,4 @@ function poolClosedError(driver, context) {
 }
 function hashRuntimeKey(key) {
     return createHash("sha256").update(key).digest("hex").slice(0, 12);
-}
-function errorMessage(error) {
-    return error instanceof Error ? error.message : String(error);
 }
