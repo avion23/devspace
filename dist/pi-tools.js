@@ -1,6 +1,10 @@
-import { linkSync, lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
-import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, } from "@earendil-works/pi-coding-agent";
+import { constants, createReadStream, linkSync, lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { access } from "node:fs/promises";
+import { finished } from "node:stream/promises";
+import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, DEFAULT_MAX_BYTES, formatSize, truncateHead, } from "@earendil-works/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
+// The dependency's signature-based image detector is not publicly exported.
+const { detectSupportedImageMimeTypeFromFile } = await import(new URL("./utils/mime.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
 // Single source for bash timeout bounds (seconds): the MCP schema in server.js
 // imports these consts, so schema and executor cannot drift (rev 6 split-brain:
@@ -41,12 +45,91 @@ async function runTool(execute, input, context) {
         return { content: formatToolError(error), isError: true };
     }
 }
+async function readTextFile(path, offset = 1, limit) {
+    const stream = createReadStream(path, { encoding: "utf8", highWaterMark: 64 * 1024 });
+    let line = 1;
+    let lineStarted = false;
+    let selectedLines = 0;
+    let selectedBytes = 0;
+    let lastLineBytes = 0;
+    let firstLineBytes = 0;
+    let prefix = "";
+    function append(text) {
+        selectedBytes += Buffer.byteLength(text, "utf8");
+        // Two extra code units cover byte overflow plus a newline at the
+        // boundary; even a huge single line retains only this bounded prefix.
+        if (prefix.length < DEFAULT_MAX_BYTES + 2) {
+            prefix += text.slice(0, DEFAULT_MAX_BYTES + 2 - prefix.length);
+        }
+    }
+    function consume(text) {
+        if (line < offset || (limit !== undefined && line - offset >= limit))
+            return;
+        if (!lineStarted) {
+            if (selectedLines > 0)
+                append("\n");
+            selectedLines++;
+            lastLineBytes = 0;
+            lineStarted = true;
+        }
+        const bytes = Buffer.byteLength(text, "utf8");
+        lastLineBytes += bytes;
+        if (selectedLines === 1)
+            firstLineBytes += bytes;
+        append(text);
+    }
+    try {
+        // Scan to EOF for the upstream's exact total/remaining-line notices,
+        // but retain only the requested selection's bounded output prefix.
+        for await (const chunk of stream) {
+            let start = 0;
+            let end;
+            while ((end = chunk.indexOf("\n", start)) !== -1) {
+                consume(chunk.slice(start, end));
+                line++;
+                lineStarted = false;
+                start = end + 1;
+            }
+            consume(chunk.slice(start));
+        }
+        consume(""); // Empty files and a final newline each have a final empty line.
+    }
+    finally {
+        stream.destroy();
+        await finished(stream, { cleanup: true }).catch(() => {});
+    }
+    if (offset > line) {
+        throw new Error(`Offset ${offset} is beyond end of file (${line} lines total)`);
+    }
+    const truncation = truncateHead(prefix);
+    truncation.totalLines = selectedLines - (lastLineBytes === 0 ? 1 : 0);
+    truncation.totalBytes = selectedBytes;
+    let text = truncation.content;
+    let details;
+    if (truncation.firstLineExceedsLimit) {
+        text = `[Line ${offset} is ${formatSize(firstLineBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${offset}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
+        details = { truncation };
+    }
+    else if (truncation.truncated) {
+        const endLine = offset + truncation.outputLines - 1;
+        const sizeNote = truncation.truncatedBy === "bytes" ? ` (${formatSize(DEFAULT_MAX_BYTES)} limit)` : "";
+        text += `\n\n[Showing lines ${offset}-${endLine} of ${line}${sizeNote}. Use offset=${endLine + 1} to continue.]`;
+        details = { truncation };
+    }
+    else if (limit !== undefined && offset + selectedLines - 1 < line) {
+        text += `\n\n[${line - (offset + selectedLines - 1)} more lines in file. Use offset=${offset + selectedLines} to continue.]`;
+    }
+    return { content: [{ type: "text", text }], details };
+}
 export async function readFileTool(input, context) {
     const path = resolveAllowedPath(input.path, context.cwd, context.readRoots ?? [context.root], { followFinal: true });
-    // Hotfix pending rev 8 (live-only 2026-09-05): stat inside try so missing
-    // files return the upstream isError shape (via formatToolError) instead of
-    // throwing MCP -32603; reject non-regular files before reading. Residual
-    // TOCTOU (size-check-then-read race) intentionally stays — see PATCHES.md.
+    for (const name of ["offset", "limit"]) {
+        if (input[name] !== undefined && (!Number.isSafeInteger(input[name]) || input[name] <= 0)) {
+            return { content: [{ type: "text", text: `${name} must be a positive safe integer` }], isError: true };
+        }
+    }
+    // Missing files return the upstream isError shape; reject non-regular
+    // files before reading. Existing path-check/open TOCTOU remains unchanged.
     let stats;
     try {
         stats = statSync(path);
@@ -60,18 +143,17 @@ export async function readFileTool(input, context) {
             isError: true,
         };
     }
-    if (stats.size > MAX_READ_FILE_BYTES) {
-        return {
-            content: [{ type: "text", text: formatReadLimitError(path, stats.size) }],
-            isError: true,
-        };
-    }
-    const tool = createReadTool(context.cwd);
-    return runTool((params) => tool.execute("read_file", params), {
-        path,
-        offset: input.offset,
-        limit: input.limit,
-    }, context);
+    return runTool(async (params) => {
+        await access(path, constants.R_OK);
+        if (!await detectSupportedImageMimeTypeFromFile(path)) {
+            return readTextFile(path, params.offset, params.limit);
+        }
+        // Images still use the upstream binary reader and its existing size cap.
+        if (stats.size > MAX_READ_FILE_BYTES) {
+            throw new Error(formatReadLimitError(path, stats.size));
+        }
+        return createReadTool(context.cwd).execute("read_file", params);
+    }, { path, offset: input.offset, limit: input.limit }, context);
 }
 export async function writeFileTool(input, context) {
     const path = resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
