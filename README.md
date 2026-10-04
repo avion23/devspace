@@ -5,8 +5,21 @@ Maintained fork of [`@waishnav/devspace`](https://www.npmjs.com/package/@waishna
 ## Install
 
 ```
-npm i -g https://github.com/avion23/devspace/archive/refs/tags/v1.0.8-r15.tar.gz
+npm i -g https://github.com/avion23/devspace/archive/refs/tags/v1.0.8-r16.tar.gz
 ```
+
+## Command and read behavior
+
+Commands return within 30 seconds. If `running` is true, poll `write_stdin` with
+the returned `workspaceId` and `sessionId`; do not rerun the command. Bash's
+`timeout` remains the process execution deadline across polls. Send `chars="\u0003"`
+to cancel the owned process group; intentionally detached groups are outside
+cancellation scope. `exec_command` and `write_stdin` are available in every tool mode.
+
+Text reads stream only the requested range, with bounded output. A large file
+can be read with `offset` and `limit`; the whole-file 5 MiB guard applies only
+to images. Workspace instructions name the execution and file-write tools.
+This does not override ChatGPT's connector-side tool selection.
 
 ## Upgrade to a new tag
 
