@@ -233,7 +233,11 @@ async function serve() {
     const { createServer } = await import("./server.js");
     const config = loadConfig();
     const { app, close, localAgentProviders } = createServer(config);
-    const httpServer = app.listen(config.port, config.host, () => {
+    const httpServer = app.listen(config.port, config.host, (error) => {
+        if (error) {
+            console.error(`devspace could not listen on ${config.host}:${config.port}: ${error.message}`);
+            process.exit(1);
+        }
         console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
         console.log(`public base url: ${config.publicBaseUrl}`);
         console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);

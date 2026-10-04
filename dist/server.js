@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { access, realpath } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -23,12 +23,11 @@ import { ProcessSessionManager } from "./process-sessions.js";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
-import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availability.js";
-import { buildLocalAgentCatalog, buildLocalAgentProviderStatuses, formatLocalAgentProviderStatusSummary, } from "./local-agent-catalog.js";
+import { buildLocalAgentCatalog, buildLocalAgentProviderStatuses, } from "./local-agent-catalog.js";
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -1706,47 +1705,4 @@ export function createServer(config = loadConfig(), options = {}) {
             return closePromise;
         },
     };
-}
-async function isMainModule() {
-    if (!process.argv[1])
-        return false;
-    const modulePath = await realpath(fileURLToPath(import.meta.url));
-    const entrypointPath = await realpath(process.argv[1]);
-    return modulePath === entrypointPath;
-}
-if (await isMainModule()) {
-    const { app, config, close, localAgentProviders } = createServer();
-    const httpServer = app.listen(config.port, config.host, () => {
-        console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
-        console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
-        console.log("auth: oauth owner-token flow required");
-        console.log(`logging: ${config.logging.level} ${config.logging.format}`);
-        console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
-        console.log(`asset logging: ${config.logging.assets ? "enabled" : "disabled"}`);
-        console.log(`trust proxy: ${config.logging.trustProxy ? "enabled" : "disabled"}`);
-        const artifactDownloadStatus = !config.artifactsEnabled
-            ? "disabled"
-            : isArtifactDownloadSupportedPlatform()
-                ? "enabled"
-                : `unsupported on ${process.platform}`;
-        console.log(`native artifact download: ${artifactDownloadStatus}`);
-        console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
-        console.log(`bash timeout: default ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}s, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}s`);
-    });
-    let shuttingDown = false;
-    const shutdown = async () => {
-        if (shuttingDown)
-            return;
-        shuttingDown = true;
-        await shutdownHttpServer(httpServer, close);
-        process.exit(0);
-    };
-    const handleShutdown = () => {
-        void shutdown().catch((error) => {
-            console.error("devspace shutdown failed", error);
-            process.exit(1);
-        });
-    };
-    process.once("SIGINT", handleShutdown);
-    process.once("SIGTERM", handleShutdown);
 }
