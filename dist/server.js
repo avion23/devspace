@@ -17,11 +17,12 @@ import { isArtifactDownloadSupportedPlatform, registerArtifactTools, } from "./a
 import { loadConfig } from "./config.js";
 import { createOpenAIIncomingArtifactAdapter, } from "./incoming-artifacts.js";
 import { logEvent, requestIp, requestPath, commandPreview, sessionIdPrefix, } from "./logger.js";
-import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS, deletePathsTool, editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, movePathTool, readFileTool, runShellTool, writeFileTool, } from "./pi-tools.js";
+import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS, deletePathsTool, editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, movePathTool, readFileTool, writeFileTool, } from "./pi-tools.js";
 import { execFile } from "node:child_process";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { McpSessionRegistry, } from "./mcp-sessions.js";
 import { ProcessSessionManager } from "./process-sessions.js";
+import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
@@ -46,11 +47,8 @@ const MCP_SESSION_INCUMBENT_GRACE_ENABLED = true;
 const MCP_SESSION_INCUMBENT_GRACE_MS = 5 * 60 * 1_000; // never evict a session active within this window
 // 503 Retry-After for rejected initializations (seconds).
 const MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS = 60;
-// Bash timeout bounds are single-sourced from pi-tools.js
-// (BASH_TOOL_DEFAULT_TIMEOUT_SECONDS / BASH_TOOL_MAX_TIMEOUT_SECONDS):
-// the zod schema below and the executor both use those consts. ChatGPT's
-// connector client abandons tool calls around 60s, so an omitted `timeout`
-// defaults to 45s; the pi bash tool owns the child process-tree kill.
+// Bash execution deadlines are single-sourced from pi-tools.js. HTTP calls
+// yield through ProcessSessionManager independently of the execution deadline.
 // The 30 min idle sweep bounds session age, not count; cap registered sessions.
 // Revert everything cap-related by lowering this one const (rev 4/5/7).
 const MAX_MCP_SESSIONS = 8192;
@@ -110,6 +108,12 @@ const toolNames = {
     shell: "bash",
 };
 const workspaceIdDescription = "Workspace to use. Reuse the current project's workspaceId.";
+function executionInstructions(config) {
+    const writes = config.toolMode === "codex"
+        ? "Use apply_patch for project file modifications."
+        : "Use edit for targeted modifications, write for new files or complete rewrites, delete for files, and move for renames.";
+    return `${writes} Use ${config.toolMode === "codex" ? "exec_command" : "bash or exec_command"} to execute inspection, tests, builds, and other shell work. Command and write_stdin calls yield within 30 seconds without killing valid long work. If running=true, keep the sessionId and use write_stdin with the same workspaceId to retrieve subsequent output and the final exit status; do not rerun the command. To cancel, send chars="\\u0003" with write_stdin.${config.toolMode === "codex" ? "" : " Bash timeout is the actual execution deadline across all polls, not an HTTP wait time."}`;
+}
 function serverInstructions(config) {
     const artifactInstruction = config.artifactsEnabled && isArtifactDownloadSupportedPlatform()
         ? " When the user supplies or generates a file that is not present on the DevSpace host, use download_artifact with its native file value, the existing workspace ID, and a suitable relative destination path chosen from the user's request and project structure. The tool refuses to overwrite an existing destination and returns the normalized workspace-relative path. Use normal workspace tools when explicit inspection, replacement, movement, renaming, or deletion is needed. Do not recreate binary files with write/edit calls or place signed URLs, native file objects, base64 content, or invented host paths in shell commands or logs."
@@ -118,7 +122,7 @@ function serverInstructions(config) {
         ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
         : "";
     if (config.toolMode === "codex") {
-        return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+        return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. ${executionInstructions(config)} Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
     }
     const inspection = config.toolMode !== "full"
         ? `In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use ${toolNames.shell} with command-line tools such as grep, rg, find, ls, and tree for search and directory inspection. `
@@ -127,7 +131,7 @@ function serverInstructions(config) {
         ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, but ${toolNames.read} only permits advertised SKILL.md files and files under already-loaded skill directories. `
         : "";
     const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
-    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, ${toolNames.delete} for removing files, and ${toolNames.move} for renames and moves; use ${toolNames.shell} for tests, builds, git inspection, git state changes (add, commit, merge, rebase, push), package scripts, and commands that are better executed by the shell. Do not create or modify project file content with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files. Generated build artifacts (target/, caches, coverage, reports) written by test and build commands are expected.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}${executionInstructions(config)} Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, ${toolNames.delete} for removing files, and ${toolNames.move} for renames and moves; use ${toolNames.shell} for tests, builds, git inspection, git state changes (add, commit, merge, rebase, push), package scripts, and commands that are better executed by the shell. Do not create or modify project file content with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files. Generated build artifacts (target/, caches, coverage, reports) written by test and build commands are expected.${artifactInstruction}${showChangesInstruction}`;
 }
 function formatVisibleAgent(agent) {
     const model = agent.model ? `, model ${agent.model}` : "";
@@ -232,15 +236,6 @@ function logFailedToolResponse(config, fields, content, startedAt) {
         durationMs: Math.round(performance.now() - startedAt),
         error: toolErrorPreview(content),
     });
-}
-function appendShellTimeoutGuidance(content) {
-    for (const item of content) {
-        if (item.type === "text" && item.text.includes("Command timed out after")) {
-            item.text +=
-                `\n\nThe command was killed by the bash tool timeout (${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS} seconds when the caller omits \`timeout\`). To run longer work, either split it into shorter commands, or re-run passing an explicit \`timeout\` in seconds (max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}) and wait for the result.`;
-            return;
-        }
-    }
 }
 function textBlock(text) {
     return { type: "text", text };
@@ -360,10 +355,12 @@ async function assertWorkspaceAppAssets() {
 }
 function processResult(snapshot) {
     const status = snapshot.running
-        ? `Process running with session ID ${snapshot.sessionId}.`
-        : snapshot.signal
-            ? `Process exited after signal ${snapshot.signal}.`
-            : `Process exited with code ${snapshot.exitCode ?? "unknown"}.`;
+        ? `Process running with session ID ${snapshot.sessionId}. Poll with write_stdin using this workspaceId and sessionId; do not rerun the command. Send chars="\\u0003" to cancel.`
+        : snapshot.timedOut
+            ? `Command timed out after ${snapshot.timeoutSeconds} seconds; owned process group cleanup completed. Intentionally detached groups are outside cancellation scope.`
+            : snapshot.signal
+                ? `Process exited after signal ${snapshot.signal}.`
+                : `Process exited with code ${snapshot.exitCode ?? "unknown"}.`;
     return snapshot.output ? `${snapshot.output.replace(/\n$/, "")}\n${status}` : status;
 }
 function processOutputSchema() {
@@ -372,6 +369,8 @@ function processOutputSchema() {
         running: z.boolean(),
         exitCode: z.number().int().optional(),
         signal: z.string().optional(),
+        timedOut: z.boolean(),
+        timeoutSeconds: z.number().positive().optional(),
         wallTimeMs: z.number().nonnegative(),
         outputTruncated: z.boolean(),
     });
@@ -382,6 +381,7 @@ function processToolResponse(tool, workspaceId, snapshot, summary) {
     const outputSummary = textSummary(snapshot.output ? [textBlock(snapshot.output)] : []);
     return {
         content,
+        isError: !snapshot.running && (snapshot.timedOut || Boolean(snapshot.signal) || snapshot.exitCode !== 0),
         _meta: {
             tool,
             card: {
@@ -396,15 +396,17 @@ function processToolResponse(tool, workspaceId, snapshot, summary) {
             running: snapshot.running,
             exitCode: snapshot.exitCode,
             signal: snapshot.signal,
+            timedOut: snapshot.timedOut,
+            timeoutSeconds: snapshot.timeoutSeconds,
             wallTimeMs: snapshot.wallTimeMs,
             outputTruncated: snapshot.outputTruncated,
         },
     };
 }
-function registerCodexProcessTools(server, config, workspaces, processSessions) {
+function registerProcessTools(server, config, workspaces, processSessions) {
     registerAppTool(server, "exec_command", {
         title: "Execute command",
-        description: "Run a command in a workspace. Returns its result when it exits during the yield window, otherwise returns a sessionId for write_stdin. Use this for file inspection, tests, builds, package scripts, and long-running processes.",
+        description: `Run a command in a workspace. Returns within 30 seconds with the exit result or a running sessionId for write_stdin. Use for inspection, tests, builds, package scripts, and long-running processes. ${config.toolMode === "codex" ? "Use apply_patch for project file modifications." : "Use edit/write/delete/move for project file modifications, not shell commands."}`,
         inputSchema: {
             workspaceId: z.string().describe(workspaceIdDescription),
             cmd: z.string().min(1).describe("Shell command to execute."),
@@ -457,7 +459,10 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
             workingDirectory: workingDirectory ?? ".",
             command: cmd,
             commandLength: cmd.length,
-            success: true,
+            success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+            running: snapshot.running,
+            exitCode: snapshot.exitCode,
+            timedOut: snapshot.timedOut,
             durationMs: Math.round(performance.now() - startedAt),
         });
         return processToolResponse("exec_command", workspaceId, snapshot, {
@@ -470,10 +475,10 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
     });
     registerAppTool(server, "write_stdin", {
         title: "Write to process",
-        description: "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C.",
+        description: "Poll or write characters to a process returned by bash or exec_command. Returns within 30 seconds; keep polling while running is true to retrieve final output and exit status. Omit chars or pass an empty string to poll. Pass \\u0003 to cancel the owned process group with Ctrl-C (forced termination after a short grace period). Intentionally detached groups are outside cancellation scope.",
         inputSchema: {
             workspaceId: z.string().describe("Workspace identifier used to start the process."),
-            sessionId: z.number().describe("Process session identifier returned by exec_command."),
+            sessionId: z.number().int().positive().describe("Process session identifier returned by bash or exec_command."),
             chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll."),
             columns: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this width."),
             rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
@@ -483,7 +488,7 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
                 .min(0)
                 .max(30_000)
                 .optional()
-                .describe("Milliseconds to wait for process output or completion. Defaults to 10000."),
+                .describe("Milliseconds to wait for completion (at most 30000). Polls default to 5000, writes/resizes to 250; buffered output returns immediately."),
             maxOutputTokens: z
                 .number()
                 .int()
@@ -510,7 +515,10 @@ function registerCodexProcessTools(server, config, workspaces, processSessions) 
         logToolCall(config, {
             tool: "write_stdin",
             workspaceId,
-            success: true,
+            success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+            running: snapshot.running,
+            exitCode: snapshot.exitCode,
+            timedOut: snapshot.timedOut,
             durationMs: Math.round(performance.now() - startedAt),
         });
         return processToolResponse("write_stdin", workspaceId, snapshot, {
@@ -634,10 +642,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
         const visibleAgents = includeBootstrapContext ? cardAgents : [];
         const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
         const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
-        const cardInstruction = config.skillsEnabled
+        const cardInstruction = (config.skillsEnabled
             ? "Use this workspaceId for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
-            : "Use this workspaceId for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
-        const instruction = workspaceReused
+            : "Use this workspaceId for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.") + ` ${executionInstructions(config)}`;
+        const instruction = (workspaceReused
             ? [
                 `Workspace already open as ${workspace.id}.`,
                 "Continue with this workspaceId.",
@@ -645,7 +653,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
             ].join("\n\n")
             : workspace.mode === "worktree"
                 ? "Use this workspaceId for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
-                : cardInstruction;
+                : cardInstruction) + (workspaceReused || workspace.mode === "worktree" ? ` ${executionInstructions(config)}` : "");
         const resultContent = [
             {
                 type: "text",
@@ -735,7 +743,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
     registerAppTool(server, toolNames.read, {
         title: "Read file",
         description: [
-            "Read a file in a workspace. Use this for file inspection instead of shell commands like cat or sed.",
+            "Read a file in a workspace, or the exact ~/.claude/CLAUDE.md file (read-only, no symlink redirection). Use this for file inspection instead of shell commands like cat or sed.",
             "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
             config.skillsEnabled
                 ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
@@ -750,8 +758,8 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
             path: z
                 .string()
                 .describe(config.skillsEnabled
-                ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
-                : "File path to read, relative to the workspace root."),
+                ? "Workspace-relative, absolute, or ~/ file path. Outside the workspace, only ~/.claude/CLAUDE.md, advertised SKILL.md files, and files under already-loaded skill directories are readable."
+                : "Workspace-relative, absolute, or ~/ file path. Outside the workspace, only the exact ~/.claude/CLAUDE.md file is readable."),
             offset: z
                 .number()
                 .int()
@@ -1457,9 +1465,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
     if (config.toolMode !== "codex") {
         registerAppTool(server, toolNames.shell, {
             title: "Bash",
-            description: config.toolMode !== "full"
+            description: "Returns within 10 seconds with output and exit status, or running=true and sessionId for write_stdin polling/cancellation. The execution timeout does not limit the HTTP yield window. " + (config.toolMode !== "full"
                 ? `Run a shell command in a workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. This is powerful execution and should only be exposed behind strong authentication.`
-                : `Run a shell command in a workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. This is powerful execution and should only be exposed behind strong authentication.`,
+                : `Run a shell command in a workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. This is powerful execution and should only be exposed behind strong authentication.`),
             inputSchema: {
                 workspaceId: z
                     .string()
@@ -1476,70 +1484,45 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .positive()
                     .max(BASH_TOOL_MAX_TIMEOUT_SECONDS)
                     .optional()
-                    .describe(`Timeout in seconds. Defaults to ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}.`),
+                    .describe(`Actual execution deadline in seconds, preserved across polls. Defaults to ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}.`),
             },
-            outputSchema: resultOutputSchema(),
+            outputSchema: processOutputSchema(),
             ...toolWidgetDescriptorMeta(config, "shell"),
             annotations: SHELL_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, workingDirectory, ...input }) => {
             const startedAt = performance.now();
             const workspace = workspaces.getWorkspace(workspaceId);
             const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
-            // Hard default: an omitted `timeout` must not let a bash call run unbounded
-            // past its client. Explicit caller values (including larger ones) still win;
-            // the pi bash tool owns the actual child process-tree kill.
-            const bashInput = input.timeout === undefined
-                ? { ...input, timeout: BASH_TOOL_DEFAULT_TIMEOUT_SECONDS }
-                : input;
-            const response = await runShellTool(bashInput, {
-                cwd,
-                root: workspace.root,
-            });
-            if (response.isError) {
-                appendShellTimeoutGuidance(response.content);
-                logFailedToolResponse(config, {
-                    tool: toolNames.shell,
-                    workspaceId,
-                    workingDirectory: workingDirectory ?? ".",
-                    command: input.command,
-                    commandLength: input.command.length,
-                }, response.content, startedAt);
-                return response;
-            }
-            const summary = {
+            const snapshot = await processSessions.start({
+                workspaceId,
                 command: input.command,
-                workingDirectory: workingDirectory ?? ".",
-                ...textSummary(response.content),
-            };
+                cwd,
+                workspaceRoot: workspace.root,
+                timeoutSeconds: input.timeout ?? BASH_TOOL_DEFAULT_TIMEOUT_SECONDS,
+                shellConfig: getShellConfig(),
+            });
             logToolCall(config, {
                 tool: toolNames.shell,
                 workspaceId,
                 workingDirectory: workingDirectory ?? ".",
                 command: input.command,
                 commandLength: input.command.length,
-                success: true,
+                success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+                running: snapshot.running,
+                exitCode: snapshot.exitCode,
+                timedOut: snapshot.timedOut,
                 durationMs: Math.round(performance.now() - startedAt),
             });
-            return {
-                ...response,
-                _meta: {
-                    tool: toolNames.shell,
-                    card: {
-                        workspaceId,
-                        path: workingDirectory,
-                        summary,
-                        payload: { content: response.content },
-                    },
-                },
-                structuredContent: {
-                    result: contentText(response.content),
-                },
-            };
+            return processToolResponse(toolNames.shell, workspaceId, snapshot, {
+                command: input.command,
+                workingDirectory: workingDirectory ?? ".",
+                running: snapshot.running,
+                exitCode: snapshot.exitCode,
+                wallTimeMs: snapshot.wallTimeMs,
+            });
         });
     }
-    if (config.toolMode === "codex") {
-        registerCodexProcessTools(server, config, workspaces, processSessions);
-    }
+    registerProcessTools(server, config, workspaces, processSessions);
     if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
         registerArtifactTools(server, {
             config,
@@ -1620,6 +1603,21 @@ export function createServer(config = loadConfig(), options = {}) {
             if (!config.logging.assets && path.startsWith("/mcp-app-assets"))
                 return;
             logEvent(config.logging, "info", "http_request", {
+                requestId,
+                method: req.method,
+                path,
+                status: res.statusCode,
+                durationMs: Math.round(performance.now() - startedAt),
+                ...requestLogFields(req, config),
+            });
+        });
+        res.on("close", () => {
+            if (res.writableFinished || !config.logging.requests)
+                return;
+            const path = requestPath(req);
+            if (!config.logging.assets && path.startsWith("/mcp-app-assets"))
+                return;
+            logEvent(config.logging, "warn", "http_response_incomplete", {
                 requestId,
                 method: req.method,
                 path,
@@ -1944,7 +1942,7 @@ export function createServer(config = loadConfig(), options = {}) {
                 clearInterval(sessionCleanupTimer);
                 const results = await transports.closeAll();
                 logSessionCloseResults("server_shutdown", results);
-                processSessions.shutdown();
+                await processSessions.shutdown();
                 oauthProvider.close();
                 workspaceStore.close?.();
             })();

@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { AccessDeniedError, assertAllowedPath, isPathInsideRoot, resolveAllowedPath, } from "./roots.js";
+import { AccessDeniedError, assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath, } from "./roots.js";
 import { loadWorkspaceSkills, markSkillActivated, resolveSkillReadPath, } from "./skills.js";
 import { loadLocalAgentProfiles, } from "./local-agent-profiles.js";
 export class WorkspaceRegistry {
@@ -171,6 +172,15 @@ export class WorkspaceRegistry {
         return absolutePath;
     }
     resolveReadPath(workspace, inputPath) {
+        const globalClaudePath = join(homedir(), ".claude", "CLAUDE.md");
+        if (resolve(workspace.root, expandHomePath(inputPath)) === globalClaudePath) {
+            const absolutePath = resolveAllowedPath(inputPath, workspace.root, [globalClaudePath], { followFinal: true });
+            // A file root's realpath must not authorize a different symlink target.
+            if (absolutePath !== globalClaudePath) {
+                throw new AccessDeniedError(`Path resolves outside authorized instruction file: ${inputPath}`);
+            }
+            return { absolutePath, readRoots: [workspace.root, globalClaudePath] };
+        }
         try {
             return {
                 absolutePath: this.resolvePath(workspace, inputPath),
