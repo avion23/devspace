@@ -340,3 +340,11 @@ Each entry: file, what, why, backup, revert.
 - Scope: server-side tool availability does not control ChatGPT's selected/cached catalog. The public endpoint returned HTTP 200 in 0.252 seconds during the reported network-error investigation; that excludes a sustained outage at the check time, not an earlier dropped connection. The exact network-error request remains unidentified. LSP coverage was inconclusive; Perch had no configured API key.
 - Release only: no installed package, service, auth, network configuration, or trading process was changed. Live installation/restart requires separate operator approval because DevSpace has active child processes.
 - Revert: use the `v1.0.8-r15` release files. For an approved deployment, preserve the installed files and `/etc/devspace-fork.sha256` first; restore both for rollback, then restart DevSpace only after operator approval. Keep the existing integrity gate enabled.
+
+## 2026-10-04 (rev 17) — exact global Claude instructions read access
+
+- Files: `dist/workspaces.js`, `dist/server.js`, `dist/fork-revision.js`, `README.md`, `PATCHES.md`.
+- What: permit the operator-authorized `~/.claude/CLAUDE.md` file through `read` in every tool mode, using existing home expansion and canonical path validation. Permit only that exact file, without directory/sibling access or symlink redirection to another canonical path. File mutations remain workspace-confined; do not automatically load the file. Describe the read exception in the tool catalog and README.
+- Validation: all four existing `npm test` suites pass. Independent MCP checks in minimal/full/codex modes match requested lines against a direct source read, deny directory/sibling/child/traversal/alias reads, retain the workspace mutation boundary, and confirm the original file is unchanged (27 assertions). The implementation agent also exercised final/intermediate symlink redirection controls. Syntax and diff checks pass. No test files changed.
+- Scope: the unrelated root-denial logging defect is unchanged. No installed package, service, configuration, credentials, or network exposure was changed; installation/restart still needs operator approval.
+- Revert: restore the `v1.0.8-r16` release files. Any live rollback also requires operator-approved installation/restart.
