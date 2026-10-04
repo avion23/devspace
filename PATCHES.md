@@ -57,6 +57,18 @@ not a backup file on disk.
 - `trust proxy` defaults to one hop (`DEVSPACE_TRUST_PROXY=0` disables it).
 - `serve` sets the process title `devspace-serve`, so host OOM policies that
   match `node` do not target the server.
+- `serve` exits 1 when it cannot bind (`app.listen` error), so systemd
+  `Restart=on-failure` restarts it.
+- Shutdown (`dist/server-shutdown.js`) stops accepting connections, closes
+  idle keep-alive sockets, lets in-flight requests finish (35 s deadline),
+  and only then closes the OAuth and workspace stores.
+
+## Git subprocesses (`dist/git.js`, `dist/git-worktrees.js`)
+
+- Every git call has an explicit timeout (10 s default; `add` 15 s,
+  `diff` 20 s, `worktree add` 15 s), `SIGTERM` on expiry and
+  `GIT_TERMINAL_PROMPT=0`. A timeout fails with
+  `git <args> timed out after <ms>ms`.
 
 ## Process output (`dist/process-sessions.js`)
 
@@ -97,5 +109,5 @@ profile schema reject any other value.
 ## Current fork revision
 
 `dist/fork-revision.js` holds the revision tag reported by the daemon
-(`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r18`) and installed by
+(`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r19`) and installed by
 `README.md`'s install command. Bump both together when cutting a release.
