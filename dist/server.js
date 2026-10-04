@@ -743,7 +743,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
     registerAppTool(server, toolNames.read, {
         title: "Read file",
         description: [
-            "Read a file in a workspace. Use this for file inspection instead of shell commands like cat or sed.",
+            "Read a file in a workspace, or the exact ~/.claude/CLAUDE.md file (read-only, no symlink redirection). Use this for file inspection instead of shell commands like cat or sed.",
             "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
             config.skillsEnabled
                 ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
@@ -758,8 +758,8 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
             path: z
                 .string()
                 .describe(config.skillsEnabled
-                ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
-                : "File path to read, relative to the workspace root."),
+                ? "Workspace-relative, absolute, or ~/ file path. Outside the workspace, only ~/.claude/CLAUDE.md, advertised SKILL.md files, and files under already-loaded skill directories are readable."
+                : "Workspace-relative, absolute, or ~/ file path. Outside the workspace, only the exact ~/.claude/CLAUDE.md file is readable."),
             offset: z
                 .number()
                 .int()

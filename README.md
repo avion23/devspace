@@ -18,7 +18,11 @@ cancellation scope. `exec_command` and `write_stdin` are available in every tool
 
 Text reads stream only the requested range, with bounded output. A large file
 can be read with `offset` and `limit`; the whole-file 5 MiB guard applies only
-to images. Workspace instructions name the execution and file-write tools.
+to images. In every tool mode, `read` also accepts the exact
+`~/.claude/CLAUDE.md` file (or its absolute home path), read-only. This does not
+allow its directory, siblings, or symlink redirection to another canonical path;
+write tools remain workspace-confined. The file is not automatically loaded.
+Workspace instructions name the execution and file-write tools.
 This does not override ChatGPT's connector-side tool selection.
 
 ## Upgrade to a new tag
