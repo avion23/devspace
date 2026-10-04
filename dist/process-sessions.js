@@ -214,6 +214,9 @@ export class ProcessSessionManager {
         session.terminationPromise ??= new Promise((resolve) => {
             setTimeout(() => {
                 session.process?.kill("SIGKILL");
+                // Detached groups are outside ownership but may retain our pipes.
+                // Close those handles after the normal drain/termination grace.
+                session.process?.closeStdio?.();
                 resolve();
             }, 1_000);
         });
@@ -267,7 +270,12 @@ export class ProcessSessionManager {
     startPipe(session, input) {
         const shell = resolveShellCommand(input.command);
         const detached = process.platform !== "win32";
-        const child = spawn(input.command, {
+        const commandFromStdin = input.shellConfig?.commandTransport === "stdin";
+        const command = input.shellConfig?.shell ?? input.command;
+        const args = input.shellConfig
+            ? [...input.shellConfig.args, ...(commandFromStdin ? [] : [input.command])]
+            : [];
+        const child = spawn(command, args, {
             cwd: input.cwd,
             env: processEnvironment({
                 workspaceId: input.workspaceId,
@@ -276,18 +284,25 @@ export class ProcessSessionManager {
             stdio: "pipe",
             windowsHide: true,
             detached,
-            shell: shell.executable,
+            shell: input.shellConfig ? false : shell.executable,
         });
         session.process = {
             write: (data) => child.stdin.write(data),
             kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
             resize: input.tty ? () => undefined : undefined,
+            closeStdio: () => {
+                child.stdin.destroy();
+                child.stdout.destroy();
+                child.stderr.destroy();
+            },
         };
         child.stdout.setEncoding("utf8").on("data", (data) => this.append(session, data));
         child.stderr.setEncoding("utf8").on("data", (data) => this.append(session, data));
         child.stdin.on("error", (error) => this.append(session, `${error.message}\n`));
         child.on("error", (error) => this.append(session, `${error.message}\n`));
         child.on("close", (code, signal) => this.finish(session, code ?? undefined, signal ?? undefined));
+        if (commandFromStdin)
+            child.stdin.end(input.command);
     }
     async startPty(session, input) {
         let nodePty;
@@ -327,6 +342,14 @@ export class ProcessSessionManager {
     finish(session, exitCode, signal) {
         if (!session.running)
             return;
+        // Do not publish completion while descendants still have the kill grace.
+        if (session.terminationPromise && !session.terminationComplete) {
+            void session.terminationPromise.then(() => {
+                session.terminationComplete = true;
+                this.finish(session, exitCode, signal);
+            });
+            return;
+        }
         session.running = false;
         if (session.deadlineTimer)
             clearTimeout(session.deadlineTimer);

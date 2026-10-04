@@ -22,6 +22,7 @@ import { execFile } from "node:child_process";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { McpSessionRegistry, } from "./mcp-sessions.js";
 import { ProcessSessionManager } from "./process-sessions.js";
+import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
@@ -356,7 +357,7 @@ function processResult(snapshot) {
     const status = snapshot.running
         ? `Process running with session ID ${snapshot.sessionId}. Poll with write_stdin using this workspaceId and sessionId; do not rerun the command. Send chars="\\u0003" to cancel.`
         : snapshot.timedOut
-            ? `Command timed out after ${snapshot.timeoutSeconds} seconds; process tree terminated.`
+            ? `Command timed out after ${snapshot.timeoutSeconds} seconds; owned process group cleanup completed. Intentionally detached groups are outside cancellation scope.`
             : snapshot.signal
                 ? `Process exited after signal ${snapshot.signal}.`
                 : `Process exited with code ${snapshot.exitCode ?? "unknown"}.`;
@@ -474,7 +475,7 @@ function registerProcessTools(server, config, workspaces, processSessions) {
     });
     registerAppTool(server, "write_stdin", {
         title: "Write to process",
-        description: "Poll or write characters to a process returned by bash or exec_command. Returns within 30 seconds; keep polling while running is true to retrieve final output and exit status. Omit chars or pass an empty string to poll. Pass \\u0003 to cancel the process tree with Ctrl-C (forced termination after a short grace period).",
+        description: "Poll or write characters to a process returned by bash or exec_command. Returns within 30 seconds; keep polling while running is true to retrieve final output and exit status. Omit chars or pass an empty string to poll. Pass \\u0003 to cancel the owned process group with Ctrl-C (forced termination after a short grace period). Intentionally detached groups are outside cancellation scope.",
         inputSchema: {
             workspaceId: z.string().describe("Workspace identifier used to start the process."),
             sessionId: z.number().int().positive().describe("Process session identifier returned by bash or exec_command."),
@@ -1498,6 +1499,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 cwd,
                 workspaceRoot: workspace.root,
                 timeoutSeconds: input.timeout ?? BASH_TOOL_DEFAULT_TIMEOUT_SECONDS,
+                shellConfig: getShellConfig(),
             });
             logToolCall(config, {
                 tool: toolNames.shell,
