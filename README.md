@@ -1,6 +1,6 @@
 # devspace (patched fork)
 
-Maintained fork of [`@waishnav/devspace`](https://www.npmjs.com/package/@waishnav/devspace) 1.0.8 (MIT) with tracked runtime, filesystem, sandbox, and local-agent fixes. See [`PATCHES.md`](PATCHES.md) for revision details. The package `name` and `bin` entries are unchanged, so this fork is a drop-in replacement installed at the same paths.
+Maintained fork of [`@waishnav/devspace`](https://www.npmjs.com/package/@waishnav/devspace) 1.0.8 (MIT) with tracked runtime, filesystem, sandbox, and local-agent fixes. See [`PATCHES.md`](PATCHES.md) for what the fork currently changes vs upstream; `git log` has the revision-by-revision history. The package `name` and `bin` entries are unchanged, so this fork is a drop-in replacement installed at the same paths.
 
 ## Install
 
