@@ -162,11 +162,9 @@ profile.
 ## Runtime lifecycle
 
 DevSpace keeps provider sessions warm while they are active or recently used,
-but persists only the provider session id and durable agent metadata. Native
-sharing follows the provider boundary: Codex uses one app-server across agents,
-OpenCode uses one server across sessions, ACP providers use one process across
-sessions, while Claude and Pi keep one warm runtime per DevSpace agent. There is
-one active turn per agent; different agents may run concurrently.
+but persists only the provider session id and durable agent metadata. Codex
+shares one app-server across agents. There is one active turn per agent;
+different agents may run concurrently.
 
 If the daemon restarts during a turn, persisted `starting` and `running` agents
 become `error` with a restart message. The next `agents continue <id>` request can
