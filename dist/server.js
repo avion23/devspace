@@ -7,7 +7,6 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { createOAuthMetadata, mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { registerAppResource, registerAppTool, RESOURCE_MIME_TYPE, } from "@modelcontextprotocol/ext-apps/server";
 import express from "express";
@@ -16,11 +15,10 @@ import { applyPatch } from "./apply-patch.js";
 import { isArtifactDownloadSupportedPlatform, registerArtifactTools, } from "./artifact-tools.js";
 import { loadConfig } from "./config.js";
 import { createOpenAIIncomingArtifactAdapter, } from "./incoming-artifacts.js";
-import { logEvent, requestIp, requestPath, commandPreview, sessionIdPrefix, } from "./logger.js";
+import { logEvent, requestIp, requestPath, commandPreview, } from "./logger.js";
 import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS, deletePathsTool, editFileTool, findFilesTool, grepFilesTool, listDirectoryTool, movePathTool, readFileTool, writeFileTool, } from "./pi-tools.js";
 import { execFile } from "node:child_process";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
-import { McpSessionRegistry, } from "./mcp-sessions.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
@@ -31,27 +29,6 @@ import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { getLocalAgentProviderAvailabilitySnapshot, } from "./local-agent-availability.js";
 import { buildLocalAgentCatalog, buildLocalAgentProviderStatuses, formatLocalAgentProviderStatusSummary, } from "./local-agent-catalog.js";
-// MCP clients can reconnect without closing the previous transport. Bound stale
-// session retention so abandoned MCP servers do not accumulate for the life of the process.
-const MCP_SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1_000;
-const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
-// Milliseconds per second for idle-age conversions.
-const MS_PER_SECOND = 1_000;
-// Single revert flag for rev-7 incumbent grace: set false to restore pure
-// evict-oldest-on-cap (rev 5) without touching the cap itself.
-const MCP_SESSION_INCUMBENT_GRACE_ENABLED = true;
-// Hotfix pending rev 8 (live-only 2026-09-05): the rev-7 grace compared idle age
-// against the full idle TTL, which wedged at cap under zombie-session floods
-// (oldest idle stuck at 17-30 min -> every new initialize got 503). The grace
-// is a RECENT-ACTIVITY window instead.
-const MCP_SESSION_INCUMBENT_GRACE_MS = 5 * 60 * 1_000; // never evict a session active within this window
-// 503 Retry-After for rejected initializations (seconds).
-const MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS = 60;
-// Bash execution deadlines are single-sourced from pi-tools.js. HTTP calls
-// yield through ProcessSessionManager independently of the execution deadline.
-// The 30 min idle sweep bounds session age, not count; cap registered sessions.
-// Revert everything cap-related by lowering this one const (rev 4/5/7).
-const MAX_MCP_SESSIONS = 8192;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -145,14 +122,6 @@ function formatAvailableAgentProvider(provider) {
         provider.note,
     ].filter(Boolean).join(", ");
     return `${provider.id}${details ? ` (${details})` : ""}`;
-}
-function resultOutputSchema(extra = {}) {
-    return {
-        result: z
-            .string()
-            .describe("Model-readable result text for follow-up reasoning and plain MCP hosts."),
-        ...extra,
-    };
 }
 const workspaceSkillOutputSchema = z.object({
     name: z.string(),
@@ -364,7 +333,7 @@ function processResult(snapshot) {
     return snapshot.output ? `${snapshot.output.replace(/\n$/, "")}\n${status}` : status;
 }
 function processOutputSchema() {
-    return resultOutputSchema({
+    return {
         sessionId: z.number().optional(),
         running: z.boolean(),
         exitCode: z.number().int().optional(),
@@ -373,7 +342,7 @@ function processOutputSchema() {
         timeoutSeconds: z.number().positive().optional(),
         wallTimeMs: z.number().nonnegative(),
         outputTruncated: z.boolean(),
-    });
+    };
 }
 function processToolResponse(tool, workspaceId, snapshot, summary) {
     const result = processResult(snapshot);
@@ -391,7 +360,6 @@ function processToolResponse(tool, workspaceId, snapshot, summary) {
             },
         },
         structuredContent: {
-            result,
             sessionId: snapshot.sessionId,
             running: snapshot.running,
             exitCode: snapshot.exitCode,
@@ -600,7 +568,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
             agentProviders: z.array(workspaceLocalAgentProviderOutputSchema).optional(),
             agents: z.array(workspaceLocalAgentOutputSchema).optional(),
             skillDiagnostics: z.array(z.unknown()).optional(),
-            instruction: z.string(),
         },
         ...toolWidgetDescriptorMeta(config, "workspace"),
         annotations: { readOnlyHint: true },
@@ -736,7 +703,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         skillDiagnostics: workspace.skillDiagnostics,
                     }
                     : {}),
-                instruction,
             },
         };
     });
@@ -773,7 +739,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 .optional()
                 .describe("Maximum number of lines to read."),
         },
-        outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "read"),
         annotations: { readOnlyHint: true },
     }, async ({ workspaceId, ...input }) => {
@@ -817,9 +782,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     payload: { content: response.content },
                 },
             },
-            structuredContent: {
-                result: contentText(response.content),
-            },
         };
     });
     if (config.toolMode !== "codex") {
@@ -835,7 +797,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("File path to write, relative to the workspace root."),
                 content: z.string().describe("Complete new file content."),
             },
-            outputSchema: resultOutputSchema(),
+            outputSchema: {
+                additions: z.number(),
+                removals: z.number(),
+                lines: z.number(),
+                characters: z.number(),
+            },
             ...toolWidgetDescriptorMeta(config, "write"),
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -882,9 +849,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         },
                     },
                 },
-                structuredContent: {
-                    result: contentText(response.content),
-                },
+                structuredContent: summary,
             };
         });
         registerAppTool(server, toolNames.edit, {
@@ -906,9 +871,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 }))
                     .min(1),
             },
-            outputSchema: resultOutputSchema({
+            outputSchema: {
                 status: z.literal("applied"),
-            }),
+                additions: z.number(),
+                removals: z.number(),
+                editCount: z.number(),
+            },
             ...toolWidgetDescriptorMeta(config, "edit"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -957,7 +925,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 },
                 structuredContent: {
                     status: "applied",
-                    result: contentText(editContent),
+                    additions: stats.additions,
+                    removals: stats.removals,
+                    editCount: input.edits.length,
                 },
             };
         });
@@ -973,7 +943,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .min(1)
                     .describe("Files to delete; all paths are validated before anything is removed."),
             },
-            outputSchema: resultOutputSchema(),
             _meta: {},
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -1001,12 +970,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 success: true,
                 durationMs: Math.round(performance.now() - startedAt),
             });
-            return {
-                ...response,
-                structuredContent: {
-                    result: contentText(response.content),
-                },
-            };
+            return response;
         });
         registerAppTool(server, toolNames.move, {
             title: "Move file",
@@ -1022,7 +986,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe("Destination path, relative to the workspace root; must not already exist."),
             },
-            outputSchema: resultOutputSchema(),
             _meta: {},
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -1049,12 +1012,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 success: true,
                 durationMs: Math.round(performance.now() - startedAt),
             });
-            return {
-                ...response,
-                structuredContent: {
-                    result: contentText(response.content),
-                },
-            };
+            return response;
         });
         const REPO_STATUS_TOOL_ANNOTATIONS = {
             readOnlyHint: true,
@@ -1070,7 +1028,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe(workspaceIdDescription),
             },
-            outputSchema: resultOutputSchema(),
             _meta: {},
             annotations: REPO_STATUS_TOOL_ANNOTATIONS,
         }, async ({ workspaceId }) => {
@@ -1157,9 +1114,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 });
                 return {
                     content: [{ type: "text", text: text }],
-                    structuredContent: {
-                        result: text,
-                    },
                 };
             }
             catch (error) {
@@ -1185,7 +1139,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe("Patch text enclosed by *** Begin Patch and *** End Patch markers."),
             },
-            outputSchema: resultOutputSchema({
+            outputSchema: {
                 additions: z.number(),
                 removals: z.number(),
                 files: z.array(z.object({
@@ -1193,7 +1147,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     previousPath: z.string().optional(),
                     operation: z.enum(["add", "update", "delete", "move"]),
                 })),
-            }),
+            },
             ...toolWidgetDescriptorMeta(config, "edit"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, patch }) => {
@@ -1229,7 +1183,6 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     },
                 },
                 structuredContent: {
-                    result,
                     additions: applied.additions,
                     removals: applied.removals,
                     files: applied.files,
@@ -1246,7 +1199,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe(workspaceIdDescription),
             },
-            outputSchema: resultOutputSchema(),
+            outputSchema: {
+                summary: reviewSummaryOutputSchema,
+                files: z.array(reviewFileOutputSchema),
+            },
             ...toolWidgetDescriptorMeta(config, "show_changes"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId }) => {
@@ -1278,7 +1234,8 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     },
                 },
                 structuredContent: {
-                    result: contentText(content),
+                    summary: review.summary,
+                    files: review.files,
                 },
             };
         });
@@ -1298,7 +1255,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("Optional path or glob scope relative to the workspace root."),
                 include: z.string().optional().describe("Optional include glob."),
             },
-            outputSchema: resultOutputSchema(),
+            outputSchema: {
+                pattern: z.string(),
+                scope: z.string(),
+                lines: z.number(),
+                characters: z.number(),
+            },
             ...toolWidgetDescriptorMeta(config, "search"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId, ...input }) => {
@@ -1341,9 +1303,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         payload: { content: response.content },
                     },
                 },
-                structuredContent: {
-                    result: contentText(response.content),
-                },
+                structuredContent: summary,
             };
         });
         registerAppTool(server, toolNames.glob, {
@@ -1359,7 +1319,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .optional()
                     .describe("Optional path scope relative to the workspace root."),
             },
-            outputSchema: resultOutputSchema(),
+            outputSchema: {
+                pattern: z.string(),
+                scope: z.string(),
+                lines: z.number(),
+                characters: z.number(),
+            },
             ...toolWidgetDescriptorMeta(config, "search"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId, ...input }) => {
@@ -1402,9 +1367,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         payload: { content: response.content },
                     },
                 },
-                structuredContent: {
-                    result: contentText(response.content),
-                },
+                structuredContent: summary,
             };
         });
         registerAppTool(server, toolNames.ls, {
@@ -1418,7 +1381,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe("Directory path to list, relative to the workspace root."),
             },
-            outputSchema: resultOutputSchema(),
+            outputSchema: {
+                lines: z.number(),
+                characters: z.number(),
+            },
             ...toolWidgetDescriptorMeta(config, "directory"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId, ...input }) => {
@@ -1456,9 +1422,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         payload: { content: response.content },
                     },
                 },
-                structuredContent: {
-                    result: contentText(response.content),
-                },
+                structuredContent: summary,
             };
         });
     }
@@ -1542,7 +1506,6 @@ export function createServer(config = loadConfig(), options = {}) {
         host: config.host,
         ...(allowedHosts ? { allowedHosts } : {}),
     });
-    const transports = new McpSessionRegistry();
     const issuerUrl = new URL(config.publicBaseUrl);
     const mcpUrl = new URL("/mcp", issuerUrl);
     const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
@@ -1565,32 +1528,8 @@ export function createServer(config = loadConfig(), options = {}) {
     const processSessions = new ProcessSessionManager();
     const localAgentProviders = buildLocalAgentProviderStatuses(config.subagents, getLocalAgentProviderAvailabilitySnapshot());
     const resolveLocalAgentProviders = () => buildLocalAgentProviderStatuses(config.subagents, getLocalAgentProviderAvailabilitySnapshot());
-    const logSessionCloseResults = (reason, results) => {
-        for (const result of results) {
-            if (result.error) {
-                logEvent(config.logging, "warn", "mcp_session_close_failed", {
-                    reason,
-                    sessionIdPrefix: sessionIdPrefix(result.sessionId),
-                    error: result.error instanceof Error
-                        ? result.error.message
-                        : String(result.error),
-                });
-                continue;
-            }
-            logEvent(config.logging, "info", "mcp_session_closed", {
-                reason,
-                sessionIdPrefix: sessionIdPrefix(result.sessionId),
-            });
-        }
-    };
-    const sessionCleanupTimer = setInterval(() => {
-        void transports
-            .closeIdle(MCP_SESSION_IDLE_TIMEOUT_MS)
-            .then((results) => logSessionCloseResults("idle_timeout", results));
-    }, MCP_SESSION_CLEANUP_INTERVAL_MS);
-    sessionCleanupTimer.unref();
     if (config.logging.trustProxy) {
-        app.set("trust proxy", true);
+        app.set("trust proxy", 1);
     }
     app.use((req, res, next) => {
         const requestId = randomUUID();
@@ -1703,8 +1642,11 @@ export function createServer(config = loadConfig(), options = {}) {
     });
     app.all("/mcp", async (req, res) => {
         const requestId = res.locals.requestId;
-        const sessionId = req.header("mcp-session-id");
-        const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
+        if (req.method === "GET" || req.method === "DELETE") {
+            res.setHeader("Allow", "POST");
+            sendJsonRpcError(res, 405, -32000, "Method not allowed; this server is stateless and only supports POST /mcp");
+            return;
+        }
         await new Promise((resolve, reject) => {
             bearerAuth(req, res, (error) => {
                 if (error)
@@ -1729,207 +1671,25 @@ export function createServer(config = loadConfig(), options = {}) {
         logEvent(config.logging, "debug", "mcp_request", {
             requestId,
             method: req.method,
-            sessionIdPresent: Boolean(sessionId),
-            sessionIdPrefix: sessionIdPrefix(sessionId),
-            isInitialize: initializeRequest,
         });
-        let reservation;
-        let reservationConsumed = false;
-        let registrationRejected = false;
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        const server = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, resolveLocalAgentProviders, incomingArtifactAdapters);
         try {
-            let transport;
-            if (sessionId) {
-                transport = transports.get(sessionId);
-                if (!transport) {
-                    sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
-                    return;
-                }
-            }
-            else if (initializeRequest) {
-                // The cap bounds memory, not clients. Rev-7 incumbent grace: a NEW
-                // session must not evict a live incumbent mid-conversation (next call
-                // -> 404 "Unknown MCP session"). If the oldest session was active
-                // inside the recent-activity grace window it may be live, so reject
-                // the newcomer with 503 Retry-After instead of evicting. Only an
-                // oldest already past the grace window is evicted. Hotfix pending
-                // rev 8 (2026-09-05): grace was the full idle TTL, which wedged.
-                // Revert: MCP_SESSION_INCUMBENT_GRACE_ENABLED=false restores rev-5
-                // pure evict-oldest; MAX_MCP_SESSIONS remains the single cap const.
-                if (transports.size >= MAX_MCP_SESSIONS) {
-                    let oldestKey;
-                    let oldestEntry;
-                    for (const [sessionId, entry] of transports.sessions) {
-                        if (!oldestEntry || entry.lastActivityAt < oldestEntry.lastActivityAt) {
-                            oldestKey = sessionId;
-                            oldestEntry = entry;
-                        }
-                    }
-                    if (!oldestKey || !oldestEntry) {
-                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
-                            requestId,
-                            currentSessions: transports.size,
-                            limit: MAX_MCP_SESSIONS,
-                            ...requestLogFields(req, config),
-                        });
-                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
-                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
-                        return;
-                    }
-                    const oldestIdleMs = Date.now() - oldestEntry.lastActivityAt;
-                    const idleSeconds = Math.max(0, Math.floor(oldestIdleMs / MS_PER_SECOND));
-                    if (MCP_SESSION_INCUMBENT_GRACE_ENABLED && oldestIdleMs < MCP_SESSION_INCUMBENT_GRACE_MS) {
-                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
-                            requestId,
-                            currentSessions: transports.size,
-                            limit: MAX_MCP_SESSIONS,
-                            idleSeconds,
-                            ...requestLogFields(req, config),
-                        });
-                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
-                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
-                        return;
-                    }
-                    reservation = transports.reserve(MAX_MCP_SESSIONS, oldestKey);
-                    if (!reservation) {
-                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
-                            requestId,
-                            currentSessions: transports.size,
-                            limit: MAX_MCP_SESSIONS,
-                            idleSeconds,
-                            ...requestLogFields(req, config),
-                        });
-                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
-                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
-                        return;
-                    }
-                    const victimLastActivityAt = oldestEntry.lastActivityAt;
-                    const victimActivityVersion = oldestEntry.activityVersion;
-                    // Hotfix pending rev 8 (live-only 2026-09-05): demote per-event
-                    // eviction log to debug; failures stay warn (see below).
-                    logEvent(config.logging, "debug", "mcp_session_evicted", {
-                        requestId,
-                        evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
-                        idleSeconds,
-                        currentSessions: transports.size,
-                        limit: MAX_MCP_SESSIONS,
-                        ...requestLogFields(req, config),
-                    });
-                    try {
-                        await oldestEntry.transport.close();
-                    }
-                    catch (error) {
-                        logEvent(config.logging, "warn", "mcp_session_evict_close_failed", {
-                            requestId,
-                            evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
-                            idleSeconds,
-                            error: error instanceof Error ? error.message : String(error),
-                        });
-                    }
-                    // Re-validate: the victim may have become active during the close
-                    // await (transports.get refreshes lastActivityAt). Skip removal then.
-                    const currentVictim = transports.sessions.get(oldestKey);
-                    if (currentVictim &&
-                        (currentVictim.lastActivityAt !== victimLastActivityAt ||
-                            currentVictim.activityVersion !== victimActivityVersion)) {
-                        logEvent(config.logging, "debug", "mcp_session_evict_skipped", {
-                            requestId,
-                            evictedSessionIdPrefix: sessionIdPrefix(oldestKey),
-                            idleSeconds,
-                        });
-                        transports.release(reservation);
-                        reservation = undefined;
-                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
-                            requestId,
-                            currentSessions: transports.size,
-                            limit: MAX_MCP_SESSIONS,
-                            idleSeconds,
-                            ...requestLogFields(req, config),
-                        });
-                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
-                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
-                        return;
-                    }
-                    else {
-                        // onclose may already have removed it; delete is a no-op then.
-                        transports.remove(oldestKey);
-                    }
-                }
-                else {
-                    reservation = transports.reserve(MAX_MCP_SESSIONS);
-                    if (!reservation) {
-                        logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
-                            requestId,
-                            currentSessions: transports.size,
-                            limit: MAX_MCP_SESSIONS,
-                            ...requestLogFields(req, config),
-                        });
-                        res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
-                        sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
-                        return;
-                    }
-                }
-                transport = new StreamableHTTPServerTransport({
-                    sessionIdGenerator: () => randomUUID(),
-                    onsessioninitialized: (newSessionId) => {
-                        if (transport) {
-                            reservationConsumed = transports.register(newSessionId, transport, reservation);
-                            if (!reservationConsumed) {
-                                registrationRejected = true;
-                                void transport.close().catch(() => { });
-                                throw new Error("MCP session capacity reservation was invalidated");
-                            }
-                        }
-                        logEvent(config.logging, "info", "mcp_session_created", {
-                            requestId,
-                            sessionIdPrefix: sessionIdPrefix(newSessionId),
-                            ...requestLogFields(req, config),
-                        });
-                    },
-                });
-                transport.onclose = () => {
-                    const closedSessionId = transport?.sessionId;
-                    if (closedSessionId && transports.remove(closedSessionId)) {
-                        logEvent(config.logging, "info", "mcp_session_closed", {
-                            reason: "transport_close",
-                            sessionIdPrefix: sessionIdPrefix(closedSessionId),
-                        });
-                    }
-                };
-                const server = createMcpServer(config, workspaces, reviewCheckpoints, processSessions, resolveLocalAgentProviders, incomingArtifactAdapters);
-                await server.connect(transport);
-            }
-            else {
-                sendJsonRpcError(res, 400, -32000, "No valid MCP session");
-                return;
-            }
+            await server.connect(transport);
             await transport.handleRequest(req, res, req.body);
         }
         catch (error) {
-            if (registrationRejected) {
-                logEvent(config.logging, "warn", "mcp_session_limit_rejected", {
-                    requestId,
-                    currentSessions: transports.size,
-                    limit: MAX_MCP_SESSIONS,
-                    ...requestLogFields(req, config),
-                });
-                if (!res.headersSent) {
-                    res.setHeader("Retry-After", String(MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS));
-                    sendJsonRpcError(res, 503, -32000, "Session limit reached, retry shortly");
-                }
-            }
-            else {
-                logEvent(config.logging, "error", "mcp_request_error", {
-                    requestId,
-                    error: error instanceof Error ? error.message : String(error),
-                });
-                if (!res.headersSent) {
-                    sendJsonRpcError(res, 500, -32603, "Internal server error");
-                }
+            logEvent(config.logging, "error", "mcp_request_error", {
+                requestId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            if (!res.headersSent) {
+                sendJsonRpcError(res, 500, -32603, "Internal server error");
             }
         }
         finally {
-            if (reservation && !reservationConsumed)
-                transports.release(reservation);
+            await transport.close().catch(() => { });
+            await server.close().catch(() => { });
         }
     });
     let closePromise;
@@ -1939,9 +1699,6 @@ export function createServer(config = loadConfig(), options = {}) {
         localAgentProviders,
         close: () => {
             closePromise ??= (async () => {
-                clearInterval(sessionCleanupTimer);
-                const results = await transports.closeAll();
-                logSessionCloseResults("server_shutdown", results);
                 await processSessions.shutdown();
                 oauthProvider.close();
                 workspaceStore.close?.();
@@ -1975,7 +1732,6 @@ if (await isMainModule()) {
         console.log(`native artifact download: ${artifactDownloadStatus}`);
         console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
         console.log(`bash timeout: default ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}s, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}s`);
-        console.log(`mcp sessions: max ${MAX_MCP_SESSIONS}, idle timeout ${MCP_SESSION_IDLE_TIMEOUT_MS / MS_PER_SECOND}s, limit Retry-After ${MCP_SESSION_LIMIT_RETRY_AFTER_SECONDS}s, incumbent grace ${MCP_SESSION_INCUMBENT_GRACE_ENABLED ? `${MCP_SESSION_INCUMBENT_GRACE_MS / MS_PER_SECOND}s` : "disabled"}`);
     });
     let shuttingDown = false;
     const shutdown = async () => {
