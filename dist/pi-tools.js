@@ -1,7 +1,7 @@
 import { constants, createReadStream, linkSync, lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { finished } from "node:stream/promises";
-import { createBashTool, createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, DEFAULT_MAX_BYTES, formatSize, truncateHead, } from "@earendil-works/pi-coding-agent";
+import { createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead, } from "@earendil-works/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
 // The dependency's signature-based image detector is not publicly exported.
 const { detectSupportedImageMimeTypeFromFile } = await import(new URL("./utils/mime.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
@@ -9,7 +9,7 @@ const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
 // Single source for bash timeout bounds (seconds): the MCP schema in server.js
 // imports these consts, so schema and executor cannot drift (rev 6 split-brain:
 // schema max 900 vs executor clamp 300). Out-of-range explicit values are
-// rejected by the schema; the Math.min below is defense-in-depth only.
+// rejected by the schema.
 export const BASH_TOOL_DEFAULT_TIMEOUT_SECONDS = 300;
 export const BASH_TOOL_MAX_TIMEOUT_SECONDS = 900;
 function formatReadLimitError(path, sizeBytes) {
@@ -48,76 +48,87 @@ async function runTool(execute, input, context) {
 async function readTextFile(path, offset = 1, limit) {
     const stream = createReadStream(path, { encoding: "utf8", highWaterMark: 64 * 1024 });
     let line = 1;
-    let lineStarted = false;
-    let selectedLines = 0;
-    let selectedBytes = 0;
-    let lastLineBytes = 0;
-    let firstLineBytes = 0;
     let prefix = "";
+    let bytes = 0;
+    let stopped = false;
+    let failure;
     function append(text) {
-        selectedBytes += Buffer.byteLength(text, "utf8");
-        // Two extra code units cover byte overflow plus a newline at the
-        // boundary; even a huge single line retains only this bounded prefix.
-        if (prefix.length < DEFAULT_MAX_BYTES + 2) {
-            prefix += text.slice(0, DEFAULT_MAX_BYTES + 2 - prefix.length);
-        }
-    }
-    function consume(text) {
-        if (line < offset || (limit !== undefined && line - offset >= limit))
-            return;
-        if (!lineStarted) {
-            if (selectedLines > 0)
-                append("\n");
-            selectedLines++;
-            lastLineBytes = 0;
-            lineStarted = true;
-        }
-        const bytes = Buffer.byteLength(text, "utf8");
-        lastLineBytes += bytes;
-        if (selectedLines === 1)
-            firstLineBytes += bytes;
-        append(text);
+        prefix += text;
+        bytes += Buffer.byteLength(text, "utf8");
     }
     try {
-        // Scan to EOF for the upstream's exact total/remaining-line notices,
-        // but retain only the requested selection's bounded output prefix.
-        for await (const chunk of stream) {
+        reading: for await (const chunk of stream) {
             let start = 0;
-            let end;
-            while ((end = chunk.indexOf("\n", start)) !== -1) {
-                consume(chunk.slice(start, end));
+            do {
+                const end = chunk.indexOf("\n", start);
+                const text = chunk.slice(start, end === -1 ? chunk.length : end);
+                if (line >= offset) {
+                    // A terminal empty line doesn't count toward truncateHead's
+                    // line cap. Inspect only a bounded fragment beyond it.
+                    if (line - offset >= DEFAULT_MAX_LINES && (text.length > 0 || end !== -1)) {
+                        append(text.length > 0 ? text.slice(0, 2) : "\n");
+                        stopped = true;
+                        break reading;
+                    }
+                    append(text);
+                    if (bytes > DEFAULT_MAX_BYTES) {
+                        stopped = true;
+                        break reading;
+                    }
+                    if (end !== -1) {
+                        if (limit !== undefined && line - offset + 1 >= limit) {
+                            stopped = true;
+                            break reading;
+                        }
+                        append("\n");
+                        if (bytes > DEFAULT_MAX_BYTES) {
+                            stopped = true;
+                            break reading;
+                        }
+                    }
+                }
+                if (end === -1)
+                    break;
                 line++;
-                lineStarted = false;
                 start = end + 1;
-            }
-            consume(chunk.slice(start));
+            } while (start <= chunk.length);
         }
-        consume(""); // Empty files and a final newline each have a final empty line.
+    }
+    catch (error) {
+        failure = error;
+        throw error;
     }
     finally {
         stream.destroy();
-        await finished(stream, { cleanup: true }).catch(() => {});
+        // Only suppress the iterator's expected early-exit AbortError, never
+        // a real I/O error racing with the bounded stop or stream closure.
+        await finished(stream, { cleanup: true }).catch((error) => {
+            if (!failure && !(stopped && error.code === "ABORT_ERR"))
+                throw error;
+        });
     }
     if (offset > line) {
         throw new Error(`Offset ${offset} is beyond end of file (${line} lines total)`);
     }
     const truncation = truncateHead(prefix);
-    truncation.totalLines = selectedLines - (lastLineBytes === 0 ? 1 : 0);
-    truncation.totalBytes = selectedBytes;
+    if (stopped) {
+        // These would describe only our inspected prefix, not the full file.
+        delete truncation.totalLines;
+        delete truncation.totalBytes;
+    }
     let text = truncation.content;
     let details;
     if (truncation.firstLineExceedsLimit) {
-        text = `[Line ${offset} is ${formatSize(firstLineBytes)}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${offset}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
+        text = `[Line ${offset} exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${offset}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
         details = { truncation };
     }
-    else if (truncation.truncated) {
-        const endLine = offset + truncation.outputLines - 1;
+    else if (stopped || truncation.truncated) {
+        const outputLines = truncation.truncated ? truncation.outputLines : line - offset + 1;
+        const endLine = offset + outputLines - 1;
         const sizeNote = truncation.truncatedBy === "bytes" ? ` (${formatSize(DEFAULT_MAX_BYTES)} limit)` : "";
-        text += `\n\n[Showing lines ${offset}-${endLine} of ${line}${sizeNote}. Use offset=${endLine + 1} to continue.]`;
-        details = { truncation };
-    }
-    else if (limit !== undefined && offset + selectedLines - 1 < line) {
-        text += `\n\n[${line - (offset + selectedLines - 1)} more lines in file. Use offset=${offset + selectedLines} to continue.]`;
+        text += `\n\n[Showing lines ${offset}-${endLine}${sizeNote}. Use offset=${endLine + 1} to continue.]`;
+        if (truncation.truncated)
+            details = { truncation };
     }
     return { content: [{ type: "text", text }], details };
 }
@@ -293,12 +304,4 @@ export async function listDirectoryTool(input, context) {
         : resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
     const tool = createLsTool(context.cwd);
     return runTool((params) => tool.execute("list_directory", params), path === undefined ? input : { ...input, path }, context);
-}
-export async function runShellTool(input, context) {
-    const tool = createBashTool(context.cwd);
-    const timeout = input.timeout === undefined ? BASH_TOOL_DEFAULT_TIMEOUT_SECONDS : Math.min(input.timeout, BASH_TOOL_MAX_TIMEOUT_SECONDS);
-    return runTool((params) => tool.execute("run_shell", params), {
-        command: input.command,
-        timeout,
-    }, context);
 }
