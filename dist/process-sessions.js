@@ -3,8 +3,7 @@ import { resolveShellCommand, terminateProcessTree } from "./process-platform.js
 const DEFAULT_EXEC_YIELD_MS = 10_000;
 const DEFAULT_INTERACTIVE_YIELD_MS = 250;
 const DEFAULT_POLL_YIELD_MS = 5_000;
-const MAX_COMMAND_YIELD_MS = 30_000;
-const MAX_POLL_YIELD_MS = 110_000;
+const MAX_YIELD_MS = 30_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const DEFAULT_BUFFER_CHARACTERS = 1_000_000;
 const COMPLETED_SESSION_TTL_MS = 5 * 60 * 1_000;
@@ -139,7 +138,7 @@ export class ProcessSessionManager {
     }
     async start(input) {
         // Validate before spawning: rejected limits must not leave a child behind.
-        const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_COMMAND_YIELD_MS);
+        const yieldTimeMs = boundedInteger(input.yieldTimeMs, DEFAULT_EXEC_YIELD_MS, MAX_YIELD_MS);
         boundedInteger(input.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
         if (input.timeoutSeconds !== undefined && (!Number.isFinite(input.timeoutSeconds) || input.timeoutSeconds <= 0)) {
             throw new Error("Execution timeout must be positive and finite.");
@@ -158,10 +157,12 @@ export class ProcessSessionManager {
         }
         if (input.timeoutSeconds !== undefined) {
             session.timeoutSeconds = input.timeoutSeconds;
-            session.deadlineTimer = setTimeout(() => {
-                session.timedOut = true;
-                this.stop(session, "SIGTERM");
-            }, Math.max(0, input.timeoutSeconds * 1_000 - (Date.now() - session.startedAt)));
+            if (session.running) {
+                session.deadlineTimer = setTimeout(() => {
+                    session.timedOut = true;
+                    this.stop(session, "SIGTERM");
+                }, Math.max(0, input.timeoutSeconds * 1_000 - (Date.now() - session.startedAt)));
+            }
         }
         await this.waitForExit(session, yieldTimeMs);
         const snapshot = this.consume(session, input.maxOutputTokens);
@@ -175,7 +176,7 @@ export class ProcessSessionManager {
         const yieldTimeMs = boundedInteger(input.yieldTimeMs,
             input.chars || input.columns !== undefined || input.rows !== undefined
                 ? DEFAULT_INTERACTIVE_YIELD_MS : DEFAULT_POLL_YIELD_MS,
-            Math.min(MAX_COMMAND_YIELD_MS, MAX_POLL_YIELD_MS));
+            MAX_YIELD_MS);
         const chars = input.chars ?? "";
         const interactionRequested = chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
         if (input.columns !== undefined || input.rows !== undefined) {
@@ -282,8 +283,8 @@ export class ProcessSessionManager {
             kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
             resize: input.tty ? () => undefined : undefined,
         };
-        child.stdout.on("data", (data) => this.append(session, data.toString("utf8")));
-        child.stderr.on("data", (data) => this.append(session, data.toString("utf8")));
+        child.stdout.setEncoding("utf8").on("data", (data) => this.append(session, data));
+        child.stderr.setEncoding("utf8").on("data", (data) => this.append(session, data));
         child.stdin.on("error", (error) => this.append(session, `${error.message}\n`));
         child.on("error", (error) => this.append(session, `${error.message}\n`));
         child.on("close", (code, signal) => this.finish(session, code ?? undefined, signal ?? undefined));
@@ -329,6 +330,7 @@ export class ProcessSessionManager {
         session.running = false;
         if (session.deadlineTimer)
             clearTimeout(session.deadlineTimer);
+        session.deadlineTimer = undefined;
         session.exitCode = exitCode;
         session.signal = signal;
         session.resolveExit();
@@ -365,8 +367,10 @@ export class ProcessSessionManager {
     }
     removeSession(sessionId) {
         const session = this.sessions.get(sessionId);
-        if (session?.cleanupTimer)
+        if (session?.cleanupTimer) {
             clearTimeout(session.cleanupTimer);
+            session.cleanupTimer = undefined;
+        }
         if (session?.terminationPromise) {
             void session.terminationPromise.then(() => this.sessions.delete(sessionId));
         }

@@ -459,6 +459,9 @@ function registerProcessTools(server, config, workspaces, processSessions) {
             command: cmd,
             commandLength: cmd.length,
             success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+            running: snapshot.running,
+            exitCode: snapshot.exitCode,
+            timedOut: snapshot.timedOut,
             durationMs: Math.round(performance.now() - startedAt),
         });
         return processToolResponse("exec_command", workspaceId, snapshot, {
@@ -512,6 +515,9 @@ function registerProcessTools(server, config, workspaces, processSessions) {
             tool: "write_stdin",
             workspaceId,
             success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+            running: snapshot.running,
+            exitCode: snapshot.exitCode,
+            timedOut: snapshot.timedOut,
             durationMs: Math.round(performance.now() - startedAt),
         });
         return processToolResponse("write_stdin", workspaceId, snapshot, {
@@ -1500,6 +1506,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 command: input.command,
                 commandLength: input.command.length,
                 success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+                running: snapshot.running,
+                exitCode: snapshot.exitCode,
+                timedOut: snapshot.timedOut,
                 durationMs: Math.round(performance.now() - startedAt),
             });
             return processToolResponse(toolNames.shell, workspaceId, snapshot, {
