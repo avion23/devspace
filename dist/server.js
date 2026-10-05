@@ -88,7 +88,7 @@ function executionInstructions(config) {
     const writes = config.toolMode === "codex"
         ? "Use apply_patch for project file modifications."
         : "Use edit for targeted modifications, write for new files or complete rewrites, delete for files, and move for renames.";
-    return `${writes} Use ${config.toolMode === "codex" ? "exec_command" : "bash or exec_command"} to execute inspection, tests, builds, and other shell work. Command and write_stdin calls yield within 30 seconds without killing valid long work. If running=true, keep the sessionId and use write_stdin with the same workspaceId to retrieve subsequent output and the final exit status; do not rerun the command. To cancel, send chars="\\u0003" with write_stdin.${config.toolMode === "codex" ? "" : " Bash timeout is the actual execution deadline across all polls, not an HTTP wait time."}`;
+    return `${writes} Use ${config.toolMode === "codex" ? "exec_command" : "bash or exec_command"} to execute inspection, tests, builds, and other shell work. ${config.toolMode === "codex" ? "exec_command" : "Bash and exec_command"} calls yield within 10 seconds by default (exec_command can wait up to 30 seconds via yieldTimeMs); write_stdin yields within 5 seconds when polling, or 250 ms when sending input, also configurable up to 30 seconds. This does not kill valid long work. If running=true, keep the sessionId and use write_stdin with the same workspaceId to retrieve subsequent output and the final exit status; do not rerun the command. To cancel, send chars="\\u0003" with write_stdin.${config.toolMode === "codex" ? "" : " Bash timeout is the actual execution deadline across all polls, not an HTTP wait time."}`;
 }
 function serverInstructions(config) {
     const artifactInstruction = config.artifactsEnabled && isArtifactDownloadSupportedPlatform()
@@ -382,7 +382,7 @@ function processToolResponse(tool, workspaceId, snapshot, summary) {
 function registerProcessTools(server, config, workspaces, processSessions) {
     registerAppTool(server, "exec_command", {
         title: "Execute command",
-        description: `Run a command in a workspace. Returns within 30 seconds with the exit result or a running sessionId for write_stdin. Use for inspection, tests, builds, package scripts, and long-running processes. ${config.toolMode === "codex" ? "Use apply_patch for project file modifications." : "Use edit/write/delete/move for project file modifications, not shell commands."}`,
+        description: `Run a command in a workspace. Returns within 10 seconds by default (configurable up to 30 seconds via yieldTimeMs) with the exit result or a running sessionId for write_stdin. Use for inspection, tests, builds, package scripts, and long-running processes. ${config.toolMode === "codex" ? "Use apply_patch for project file modifications." : "Use edit/write/delete/move for project file modifications, not shell commands."}`,
         inputSchema: {
             workspaceId: z.string().describe(workspaceIdDescription),
             cmd: z.string().min(1).describe("Shell command to execute."),
@@ -451,7 +451,7 @@ function registerProcessTools(server, config, workspaces, processSessions) {
     });
     registerAppTool(server, "write_stdin", {
         title: "Write to process",
-        description: "Poll or write characters to a process returned by bash or exec_command. Returns within 30 seconds; keep polling while running is true to retrieve final output and exit status. Omit chars or pass an empty string to poll. Pass \\u0003 to cancel the owned process group with Ctrl-C (forced termination after a short grace period). Intentionally detached groups are outside cancellation scope.",
+        description: "Poll or write characters to a process returned by bash or exec_command. Polls return within 5 seconds and writes/resizes within 250 ms by default (configurable up to 30 seconds via yieldTimeMs); keep polling while running is true to retrieve final output and exit status. Omit chars or pass an empty string to poll. Pass \\u0003 to cancel the owned process group with Ctrl-C (forced termination after a short grace period). Intentionally detached groups are outside cancellation scope.",
         inputSchema: {
             workspaceId: z.string().describe("Workspace identifier used to start the process."),
             sessionId: z.number().int().positive().describe("Process session identifier returned by bash or exec_command."),
@@ -1048,6 +1048,29 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
             idempotentHint: true,
             openWorldHint: false,
         };
+        // `--quiet` suppresses git's error text, so an unborn HEAD is the only
+        // expected cause of this exact shape: a plain process exit (not a
+        // timeout or a missing binary) with nothing on stdout or stderr.
+        // Anything else (timeout, git missing, permission error, corrupted
+        // repo) is a real failure and must propagate.
+        function isQuietUnbornHeadError(error) {
+            return (Boolean(error) &&
+                typeof error === "object" &&
+                !error.killed &&
+                error.code === 1 &&
+                !error.stderr?.trim());
+        }
+        // Git's own wording for "this ref has no upstream": no tracking branch
+        // configured, or HEAD is detached so it cannot have one. Any other
+        // failure (timeout, missing git, corrupted repo, ...) is a real error.
+        function isNoUpstreamError(error) {
+            return (Boolean(error) &&
+                typeof error === "object" &&
+                !error.killed &&
+                typeof error.stderr === "string" &&
+                (error.stderr.includes("no upstream configured for branch") ||
+                    error.stderr.includes("does not point to a branch")));
+        }
         registerAppTool(server, toolNames.repoStatus, {
             title: "Repository status",
             description: "Read-only git state of the workspace in one call: branch, detached state, HEAD, upstream with ahead/behind counts, dirty paths (capped at 200), and worktrees.",
@@ -1063,9 +1086,15 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
             const startedAt = performance.now();
             const workspace = workspaces.getWorkspace(workspaceId);
             const run = (args, extraArgs = []) => new Promise((resolve, reject) => {
-                execFile("git", ["--no-optional-locks", "-C", workspace.root, "-c", "core.fsmonitor=false", "-c", "core.fsmonitorDaemon=false", ...extraArgs, ...args], { timeout: 10_000, maxBuffer: 8_000_000 }, (error, stdout) => {
-                    if (error)
+                execFile("git", ["--no-optional-locks", "-C", workspace.root, "-c", "core.fsmonitor=false", "-c", "core.fsmonitorDaemon=false", ...extraArgs, ...args], { timeout: 10_000, maxBuffer: 8_000_000, env: { ...process.env, LC_ALL: "C" } }, (error, stdout, stderr) => {
+                    if (error) {
+                        // The plain execFile callback does not attach stderr to
+                        // the error itself; callers need it to tell an expected
+                        // git condition (unborn HEAD, no upstream) apart from a
+                        // real failure.
+                        error.stderr = stderr;
                         reject(error);
+                    }
                     else
                         resolve(stdout.trim());
                 });
@@ -1083,14 +1112,22 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 try {
                     head = await run(["rev-parse", "--verify", "--quiet", "HEAD"]);
                 }
-                catch { }
+                catch (error) {
+                    if (!isQuietUnbornHeadError(error))
+                        throw error;
+                }
+                const unborn = head === null;
                 let branch = null;
                 try {
                     branch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
                 }
-                catch { }
+                catch (error) {
+                    // This call fails only when HEAD is unborn (already
+                    // confirmed above); any other failure is real and propagates.
+                    if (!unborn)
+                        throw error;
+                }
                 const branchLine = statusLines[0] ?? "";
-                const unborn = head === null;
                 if (branch === null || branch === "HEAD") {
                     const unbornMatch = /No commits yet on (.+)/.exec(branchLine);
                     branch = unbornMatch ? unbornMatch[1] : (branch ?? branchLine);
@@ -1101,11 +1138,16 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 if (!unborn) {
                     try {
                         upstream = await run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+                    }
+                    catch (error) {
+                        if (!isNoUpstreamError(error))
+                            throw error;
+                    }
+                    if (upstream !== null) {
                         const counts = (await run(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).split("\t");
                         ahead = Number(counts[0]);
                         behind = Number(counts[1]);
                     }
-                    catch { }
                 }
                 let worktrees = [];
                 let worktreesError = null;

@@ -39,8 +39,12 @@ not a backup file on disk.
 - `repo_status` (`dist/server.js`): one read-only call returning `{branch,
   detached, head, upstream, ahead, behind, dirtyCount, dirtyPaths, branchLine,
   worktrees}` via `git -C <root>`, replacing repeated shell `git`
-  reconstruction. Runs with `--no-optional-locks` and fsmonitor disabled;
-  handles an unborn `HEAD`; caps `worktrees` at 50.
+  reconstruction. Runs with `--no-optional-locks`, fsmonitor disabled, and
+  `LC_ALL=C`; caps `worktrees` at 50. The unborn-`HEAD` and no-upstream cases
+  are each identified by git's specific exit code/stderr for that exact
+  condition; any other git failure (timeout, missing binary, permission
+  error, corrupted repo) propagates as a tool error instead of silently
+  defaulting.
 - `bash` (`dist/server.js`, timeout constants from `dist/pi-tools.js`):
   default timeout 300s when the caller omits one, max 900s.
   `exec_command`/`write_stdin` are available in every tool mode for

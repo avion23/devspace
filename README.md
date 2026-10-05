@@ -10,7 +10,10 @@ npm i -g https://github.com/avion23/devspace/archive/refs/tags/v1.0.8-r20.tar.gz
 
 ## Command and read behavior
 
-Commands return within 30 seconds. If `running` is true, poll `write_stdin` with
+Bash and exec_command return within 10 seconds by default (exec_command is
+configurable up to 30 seconds via `yieldTimeMs`). If `running` is true, poll `write_stdin` (returns
+within 5 seconds when polling, 250 ms when sending input, also configurable up
+to 30 seconds) with
 the returned `workspaceId` and `sessionId`; do not rerun the command. Bash's
 `timeout` remains the process execution deadline across polls. Send `chars="\u0003"`
 to cancel the owned process group; intentionally detached groups are outside
