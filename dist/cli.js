@@ -24,7 +24,7 @@ import { shutdownHttpServer } from "./server-shutdown.js";
 // timeout values without eagerly loading the heavy server module.
 import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS } from "./pi-tools.js";
 const require = createRequire(import.meta.url);
-const SUPPORTED_NODE_RANGE = ">=20.12 <27";
+const SUPPORTED_NODE_RANGE = ">=22.19 <27";
 async function main(argv) {
     assertSupportedNode();
     const [rawCommand, ...args] = argv;
