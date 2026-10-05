@@ -1,78 +1,57 @@
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
-import {
-  AcpLocalAgentDriver,
-  resolveAcpCommand,
-  resolveAcpModelConfigUpdate,
-  resolveAcpEffortConfigUpdate,
-} from "./local-agent-acp.js";
-import {
-  ClaudeLocalAgentDriver,
-  claudeCommandEnvironment,
-  type ClaudeQueryFactory,
-} from "./local-agent-claude.js";
 import { CodexLocalAgentDriver } from "./local-agent-codex.js";
-import {
-  OpencodeLocalAgentDriver,
-  extractOpenCodeFinalResponse,
-  type OpencodeFactory,
-} from "./local-agent-opencode.js";
-import {
-  PiLocalAgentDriver,
-  extractPiFinalResponse,
-  extractPiProviderError,
-  type PiSessionFactory,
-} from "./local-agent-pi.js";
-import type { LocalAgentDriver } from "./local-agent-runtime.js";
+import type {
+  CodexCommandResolver,
+  ExecFileImplementation,
+  LinuxSandboxProbeResult,
+} from "./local-agent-codex.js";
+import type {
+  LocalAgentDriver,
+  LocalAgentSandboxFallbackEvent,
+} from "./local-agent-runtime-pool.js";
 
 export type LocalAgentAdapter = LocalAgentDriver;
 
 export interface LocalAgentDriverOptions {
   env?: NodeJS.ProcessEnv;
-  claudeQueryFactory?: ClaudeQueryFactory;
-  opencodeFactory?: OpencodeFactory;
-  piSessionFactory?: PiSessionFactory;
+  codexCommandResolver?: CodexCommandResolver;
+  sandboxFallback?: "fail" | "worktree-embedded";
+  worktreeRoot?: string;
+  sandboxProbe?: () => Promise<LinuxSandboxProbeResult | boolean>;
+  onSandboxFallback?: (event: LocalAgentSandboxFallbackEvent) => void | Promise<void>;
+  sandboxProbeTtlMs?: number;
+  execFile?: ExecFileImplementation;
+  codexSandboxMode?: "auto" | "full-access";
 }
 
 export function createLocalAgentDrivers(
   options: LocalAgentDriverOptions = {},
 ): LocalAgentDriver[] {
   return [
-    new CodexLocalAgentDriver(options.env),
-    new ClaudeLocalAgentDriver(options.claudeQueryFactory, options.env),
-    new OpencodeLocalAgentDriver(options.opencodeFactory),
-    new PiLocalAgentDriver(options.piSessionFactory),
-    new AcpLocalAgentDriver("cursor", options.env),
-    new AcpLocalAgentDriver("copilot", options.env),
-    new AcpLocalAgentDriver("grok", options.env),
+    new CodexLocalAgentDriver(options.env, options.codexCommandResolver, {
+      sandboxFallback: options.sandboxFallback,
+      worktreeRoot: options.worktreeRoot,
+      sandboxProbe: options.sandboxProbe,
+      onSandboxFallback: options.onSandboxFallback,
+      sandboxProbeTtlMs: options.sandboxProbeTtlMs,
+      execFile: options.execFile,
+      sandboxMode: options.codexSandboxMode,
+    }),
   ];
 }
 
 export function createLocalAgentAdapter(
   provider: LocalAgentProvider,
   options: LocalAgentDriverOptions = {},
-): LocalAgentDriver {
-  switch (provider) {
-    case "codex": return new CodexLocalAgentDriver(options.env);
-    case "claude": return new ClaudeLocalAgentDriver(options.claudeQueryFactory, options.env);
-    case "opencode": return new OpencodeLocalAgentDriver(options.opencodeFactory);
-    case "pi": return new PiLocalAgentDriver(options.piSessionFactory);
-    case "cursor":
-    case "copilot":
-    case "grok":
-      return new AcpLocalAgentDriver(provider, options.env);
-  }
+): LocalAgentDriver | undefined {
+  if (provider !== "codex") return undefined;
+  return new CodexLocalAgentDriver(options.env, options.codexCommandResolver, {
+    sandboxFallback: options.sandboxFallback,
+    worktreeRoot: options.worktreeRoot,
+    sandboxProbe: options.sandboxProbe,
+    onSandboxFallback: options.onSandboxFallback,
+    sandboxProbeTtlMs: options.sandboxProbeTtlMs,
+    execFile: options.execFile,
+    sandboxMode: options.codexSandboxMode,
+  });
 }
-
-export function extractLocalAgentResponseText(value: unknown): string {
-  return extractOpenCodeFinalResponse(value) || extractPiFinalResponse(value);
-}
-
-export {
-  claudeCommandEnvironment,
-  extractOpenCodeFinalResponse,
-  extractPiFinalResponse,
-  extractPiProviderError,
-  resolveAcpCommand,
-  resolveAcpModelConfigUpdate,
-  resolveAcpEffortConfigUpdate,
-};

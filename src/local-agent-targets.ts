@@ -6,6 +6,57 @@ import {
 } from "./local-agent-profiles.js";
 import type { SubagentProviderConfig } from "./local-agent-config.js";
 
+export type BlockedLocalAgentModelReason = "blocked" | "below-minimum";
+
+export const CODEX_DEFAULT_MODEL = "gpt-5.6-luna";
+export const CODEX_DEFAULT_EFFORT = "max";
+
+const BLOCKED_MODEL_IDS = new Set(["gpt-5.6-terra", "gpt-5-6-terra"]);
+const MIN_GPT_MAJOR = 5;
+const MIN_GPT_MINOR = 6;
+
+/**
+ * Returns the reason a model is refused, or undefined when it is admissible.
+ * Two rules: Terra is always blocked, and any gpt-<version> model below
+ * gpt-5.6 is blocked with guidance to use gpt-5.6 models.
+ */
+export function blockedModelReason(model: string | undefined): BlockedLocalAgentModelReason | undefined {
+  if (typeof model !== "string") return undefined;
+  const modelId = model.trim().toLowerCase().split(/[/:]/).at(-1)!;
+  if (BLOCKED_MODEL_IDS.has(modelId)) return "blocked";
+
+  const match = modelId.match(/^gpt-(\d+)(?:[.-](\d+))?/);
+  if (!match) return undefined;
+  const major = Number(match[1]);
+  const minor = match[2] === undefined ? 0 : Number(match[2]);
+  if (major < MIN_GPT_MAJOR || (major === MIN_GPT_MAJOR && minor < MIN_GPT_MINOR)) return "below-minimum";
+  return undefined;
+}
+
+export function isBlockedLocalAgentModel(model: string | undefined): boolean {
+  return blockedModelReason(model) !== undefined;
+}
+
+export function blockedModelMessage(model: string | undefined): string {
+  return `Model '${model}' is blocked by DevSpace policy. Use gpt-5.6 models, e.g. gpt-5.6-luna with max thinking.`;
+}
+
+export interface LocalAgentSettings {
+  model?: string;
+  effort?: string;
+}
+
+export function resolveLocalAgentSettings(
+  provider: string,
+  model?: string,
+  effort?: string,
+): LocalAgentSettings {
+  return {
+    model: model ?? (provider === "codex" ? CODEX_DEFAULT_MODEL : undefined),
+    effort: effort ?? (provider === "codex" ? CODEX_DEFAULT_EFFORT : undefined),
+  };
+}
+
 export interface ParsedLocalAgentRunArgs {
   target: string;
   prompt: string;
@@ -133,24 +184,32 @@ export function resolveLocalAgentTarget(
   const profile = profiles.find((candidate) => candidate.name === target);
   if (profile) {
     const providerConfig = providerConfigs.find((entry) => entry.id === profile.provider);
+    const settings = resolveLocalAgentSettings(
+      profile.provider,
+      modelOverride ?? profile.model ?? providerConfig?.model,
+      effortOverride ?? profile.effort ?? providerConfig?.effort,
+    );
     return {
       kind: "profile",
       name: profile.name,
       provider: profile.provider,
-      model: modelOverride ?? profile.model ?? providerConfig?.model,
-      effort: effortOverride ?? profile.effort ?? providerConfig?.effort,
+      ...settings,
       profile,
     };
   }
 
   if (isLocalAgentProvider(target)) {
     const providerConfig = providerConfigs.find((entry) => entry.id === target);
+    const settings = resolveLocalAgentSettings(
+      target,
+      modelOverride ?? providerConfig?.model,
+      effortOverride ?? providerConfig?.effort,
+    );
     return {
       kind: "provider",
       name: target,
       provider: target,
-      model: modelOverride ?? providerConfig?.model,
-      effort: effortOverride ?? providerConfig?.effort,
+      ...settings,
     };
   }
 

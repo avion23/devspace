@@ -5,6 +5,7 @@ import {
   AgentScopeError,
   AgentStoreError,
   AgentTargetError,
+  errorMessage,
   isLocalAgentError,
   isProgrammerDefect,
   type LocalAgentError,
@@ -15,6 +16,9 @@ import {
   isLocalAgentProvider,
 } from "./local-agent-profiles.js";
 import {
+  blockedModelMessage,
+  isBlockedLocalAgentModel,
+  resolveLocalAgentSettings,
   resolveLocalAgentTarget,
 } from "./local-agent-targets.js";
 import {
@@ -28,7 +32,7 @@ import {
   type LocalAgentRunInput,
   type LocalAgentRuntimeContext,
   type LocalAgentWriteMode,
-} from "./local-agent-runtime.js";
+} from "./local-agent-runtime-pool.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { assertAllowedPath } from "./roots.js";
 import {
@@ -87,6 +91,7 @@ export class LocalAgentManager {
   private readonly logger?: LocalAgentManagerLogger;
   private readonly subagents: SubagentsConfig;
   private readonly activeTurns = new Map<string, Promise<void>>();
+  private admitting = true;
   private accepting = true;
   private closePromise?: Promise<void>;
 
@@ -108,7 +113,7 @@ export class LocalAgentManager {
   async start(input: StartLocalAgentInput): Promise<BetterResult<LocalAgentRecord, AgentStartError>> {
     const manager = this;
     return Result.gen(async function* () {
-      yield* manager.acceptingResult("start");
+      yield* manager.admittingResult("start");
       const workspaceRoot = yield* manager.authorizeWorkspace(
         input.workspaceRoot,
         input.workspaceId,
@@ -140,7 +145,10 @@ export class LocalAgentManager {
         }));
       }
       yield* manager.providerEnabledResult(target.provider, target.name, "start");
+      if (isBlockedLocalAgentModel(target.model))
+        return Result.err(blockedModelError(target.name, target.provider, target.model, "start"));
       yield* manager.driverResult(target.provider, "start");
+      yield* manager.admittingResult("start");
       const record = yield* manager.store.createResult({
         workspaceId: input.workspaceId,
         workspaceRoot,
@@ -153,7 +161,7 @@ export class LocalAgentManager {
         model: target.model,
         effort: target.effort,
         writeMode: input.writeMode,
-      }, input.workspaceId);
+      }, input.workspaceId, "start");
     });
   }
 
@@ -165,15 +173,15 @@ export class LocalAgentManager {
   ): Promise<BetterResult<LocalAgentRecord, AgentContinueError>> {
     const manager = this;
     return Result.gen(async function* () {
-      yield* manager.acceptingResult("continue", agentId);
+      yield* manager.admittingResult("continue", agentId);
       const record = yield* manager.store.getByIdResult(agentId);
       if (!record) return Result.err(agentNotFound(agentId));
       yield* manager.agentWorkspaceResult(record, scope, "continue");
       const profiles = yield* Result.await(manager.loadProfilesResult(record.workspaceRoot, record.profileName));
-      yield* manager.profileForRecordResult(record, profiles);
+      const profile = yield* manager.profileForRecordResult(record, profiles);
       yield* manager.providerEnabledResult(record.provider, record.profileName, "continue");
       yield* manager.driverResult(record.provider, "continue", agentId);
-      return manager.begin(record, prompt, overrides, scope.workspaceId);
+      return manager.begin(record, prompt, overrides, scope.workspaceId, "continue", profile);
     });
   }
 
@@ -201,7 +209,7 @@ export class LocalAgentManager {
 
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
-    this.accepting = false;
+    this.stopAdmission();
     const turns = Array.from(this.activeTurns.values());
     this.closePromise = (async () => {
       // Closing pooled runtimes is what interrupts provider turns. Waiting for
@@ -230,12 +238,21 @@ export class LocalAgentManager {
     await this.pool.evictIdle(now);
   }
 
+  stopAdmission(): void {
+    this.admitting = false;
+    this.accepting = false;
+  }
+
   private begin(
     record: LocalAgentRecord,
     prompt: string,
     overrides: RunOverrides,
     workspaceId?: string,
-  ): BetterResult<LocalAgentRecord, AgentConflictError | AgentStoreError> {
+    operation = "continue",
+    profile?: LocalAgentProfile,
+  ): BetterResult<LocalAgentRecord, AgentConflictError | AgentStoreError | AgentTargetError> {
+    if (!this.admitting || !this.accepting)
+      return this.admittingResult<LocalAgentRecord>(operation, record.id);
     if (this.activeTurns.has(record.id)) {
       return Result.err(new AgentConflictError({
         code: "AGENT_CONFLICT",
@@ -246,14 +263,28 @@ export class LocalAgentManager {
       }));
     }
 
+    const providerConfig = this.subagents.providers.find((entry) => entry.id === record.provider);
+    const settings = resolveLocalAgentSettings(
+      record.provider,
+      overrides.model ?? record.model ?? profile?.model ?? providerConfig?.model,
+      overrides.effort ?? record.effort ?? profile?.effort ?? providerConfig?.effort,
+    );
+    if (isBlockedLocalAgentModel(settings.model))
+      return Result.err(blockedModelError(record.profileName, record.provider, settings.model, operation));
+
     const updated = this.store.updateResult(record.id, {
       status: "running",
-      model: overrides.model ?? record.model,
-      effort: overrides.effort ?? record.effort,
+      model: settings.model,
+      effort: settings.effort,
       latestResponse: undefined,
       error: undefined,
       errorCode: undefined,
       errorRetryable: undefined,
+      metadata: undefined,
+      errorBackend: undefined,
+      errorStage: undefined,
+      errorDetail: undefined,
+      errorFallbackAvailable: undefined,
     });
     if (updated.isErr()) return updated;
     // Defer invocation until after the tracking entry is visible. This keeps
@@ -326,6 +357,21 @@ export class LocalAgentManager {
           const updated = this.store.updateResult(record.id, { providerSessionId });
           if (updated.isErr()) throw updated.error;
         },
+        onSandboxFallback: (event) => {
+          const current = this.store.getByIdResult(record.id);
+          if (current.isErr()) throw current.error;
+          if (!current.value) return;
+          const metadata = event.metadata ?? {
+            sandbox: event.sandbox,
+            warnings: event.warning ? [event.warning] : [],
+          };
+          const updated = this.store.updateResult(record.id, {
+            metadata,
+            previouslyUnsandboxed: true,
+            lastUnsandboxedAt: new Date().toISOString(),
+          });
+          if (updated.isErr()) throw updated.error;
+        },
       };
       const result = await this.pool.run(driver.value, context, input.value, callbacks);
       if (result.isErr()) {
@@ -343,6 +389,11 @@ export class LocalAgentManager {
         error: undefined,
         errorCode: undefined,
         errorRetryable: undefined,
+        metadata: runResult.metadata,
+        errorBackend: undefined,
+        errorStage: undefined,
+        errorDetail: undefined,
+        errorFallbackAvailable: undefined,
       });
       if (updated.isErr()) throw updated.error;
       this.log("info", "agent_run_completed", {
@@ -361,6 +412,10 @@ export class LocalAgentManager {
         error: "Unexpected internal subagent failure.",
         errorCode: "AGENT_INTERNAL_ERROR",
         errorRetryable: false,
+        errorBackend: undefined,
+        errorStage: undefined,
+        errorDetail: undefined,
+        errorFallbackAvailable: undefined,
       });
       this.log("error", "agent_run_failed", {
         provider: record.provider,
@@ -382,11 +437,20 @@ export class LocalAgentManager {
     error: LocalAgentError,
     startedAt: number,
   ): void {
+    const current = this.store.getByIdResult(record.id);
+    const metadata = current.isOk() ? current.value?.metadata : undefined;
     const persisted = this.store.updateResult(record.id, {
       status: "error",
       error: error.message,
       errorCode: error.code,
       errorRetryable: error.retryable,
+      metadata,
+      errorBackend: "backend" in error ? (error as { backend?: string }).backend : undefined,
+      errorStage: "stage" in error ? (error as { stage?: string }).stage : undefined,
+      errorDetail: "detail" in error ? (error as { detail?: string }).detail : undefined,
+      errorFallbackAvailable: "fallback_available" in error
+        ? (error as { fallback_available?: boolean }).fallback_available
+        : undefined,
     });
     this.log("error", "agent_run_failed", {
       provider: record.provider,
@@ -418,13 +482,21 @@ export class LocalAgentManager {
     }
     const body = profile?.body.trim();
     const fullPrompt = body ? `${body}\n\nTask:\n${prompt}` : prompt;
+    const providerConfig = this.subagents.providers.find((entry) => entry.id === record.provider);
+    const settings = resolveLocalAgentSettings(
+      record.provider,
+      record.model ?? profile?.model ?? providerConfig?.model,
+      record.effort ?? profile?.effort ?? providerConfig?.effort,
+    );
+    if (isBlockedLocalAgentModel(settings.model))
+      return Result.err(blockedModelError(record.profileName, record.provider, settings.model, "run"));
     return Result.ok({
       prompt: fullPrompt,
       workspaceRoot: record.workspaceRoot,
       providerSessionId: record.providerSessionId,
       writeMode: overrides.writeMode ?? "allowed",
-      model: record.model ?? profile?.model,
-      effort: record.effort ?? profile?.effort,
+      model: settings.model,
+      effort: settings.effort,
       modelOverrideRequested: overrides.model !== undefined,
       effortOverrideRequested: overrides.effort !== undefined,
     });
@@ -502,11 +574,11 @@ export class LocalAgentManager {
     }));
   }
 
-  private acceptingResult(
+  private admittingResult<T = void>(
     operation: string,
     agentId?: string,
-  ): BetterResult<void, AgentConflictError> {
-    if (this.accepting) return Result.ok(undefined);
+  ): BetterResult<T, AgentConflictError> {
+    if (this.admitting && this.accepting) return Result.ok(undefined as T);
     return Result.err(new AgentConflictError({
       code: "AGENT_CONFLICT",
       agentId,
@@ -514,6 +586,13 @@ export class LocalAgentManager {
       retryable: false,
       message: "Local agent manager is closed.",
     }));
+  }
+
+  private acceptingResult(
+    operation: string,
+    agentId?: string,
+  ): BetterResult<void, AgentConflictError> {
+    return this.admittingResult(operation, agentId);
   }
 
   private authorizeWorkspace(
@@ -588,10 +667,6 @@ export function createLocalAgentManager(options: LocalAgentManagerOptions): Loca
   return new LocalAgentManager(options);
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function safeCauseType(cause: unknown): string | undefined {
   if (cause instanceof Error) return cause.name;
   if (cause && typeof cause === "object" && "error" in cause) {
@@ -607,5 +682,21 @@ function agentNotFound(agentId: string): AgentTargetError {
     target: agentId,
     retryable: false,
     message: `Unknown subagent id: ${agentId}.`,
+  });
+}
+
+function blockedModelError(
+  target: string,
+  provider: string,
+  model: string | undefined,
+  operation: string,
+): AgentTargetError {
+  return new AgentTargetError({
+    code: "MODEL_BLOCKED",
+    target,
+    provider: isLocalAgentProvider(provider) ? provider : undefined,
+    operation,
+    retryable: false,
+    message: blockedModelMessage(model),
   });
 }

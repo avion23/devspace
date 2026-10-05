@@ -25,60 +25,6 @@ export function checkLocalAgentProviderAvailability(
   switch (provider) {
     case "codex":
       return codexAvailability(env);
-    case "claude":
-      return packageAvailability(provider, "@anthropic-ai/claude-agent-sdk");
-    case "opencode":
-      return packageAvailability(provider, "@opencode-ai/sdk/v2");
-    case "pi":
-      return packageAvailability(provider, "@earendil-works/pi-coding-agent");
-    case "cursor":
-      return commandAvailability(provider, env.CURSOR_COMMAND ?? "cursor-agent", env);
-    case "copilot":
-      return commandAvailability(provider, env.COPILOT_COMMAND ?? "copilot", env);
-    case "grok":
-      return commandAvailability(provider, env.GROK_COMMAND ?? "grok", env);
-  }
-}
-
-export function assertLocalAgentProviderAvailable(
-  provider: LocalAgentProvider,
-  env: NodeJS.ProcessEnv = process.env,
-): void {
-  const availability = checkLocalAgentProviderAvailability(provider, env);
-  if (availability.available) return;
-  throw new Error(
-    `${provider} provider is not available: ${availability.reason ?? "provider preflight failed"}`,
-  );
-}
-
-export function formatLocalAgentProviderAvailabilitySummary(
-  providers: LocalAgentProviderAvailability[],
-): string {
-  const available = providers
-    .filter((provider) => provider.available)
-    .map(formatAvailableProvider);
-  const unavailable = providers
-    .filter((provider) => !provider.available)
-    .map((provider) => `${provider.name} (${provider.reason ?? "unavailable"})`);
-  return [
-    available.length > 0 ? `available: ${available.join(", ")}` : undefined,
-    unavailable.length > 0 ? `unavailable: ${unavailable.join(", ")}` : undefined,
-  ].filter(Boolean).join("; ");
-}
-
-function packageAvailability(
-  provider: LocalAgentProvider,
-  packageName: string,
-): LocalAgentProviderAvailability {
-  try {
-    import.meta.resolve(packageName);
-    return { name: provider, available: true };
-  } catch {
-    return {
-      name: provider,
-      available: false,
-      reason: `${packageName} package not found`,
-    };
   }
 }
 
@@ -122,10 +68,6 @@ function resolveCommand(command: string, env: NodeJS.ProcessEnv): string | undef
     }
   }
   return undefined;
-}
-
-function formatAvailableProvider(provider: LocalAgentProviderAvailability): string {
-  return provider.note ? `${provider.name} (${provider.note})` : provider.name;
 }
 
 function executableExists(command: string): boolean {

@@ -1,15 +1,20 @@
 import { homedir } from "node:os";
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { isSandboxFallbackEnabled } from "./local-agent-config.js";
 import {
   AgentProviderExecutionError,
   AgentProviderProtocolError,
   AgentProviderUnavailableError,
+  AgentSandboxUnavailableError,
   captureAgentProviderResult,
+  errorMessage,
 } from "./local-agent-errors.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import { terminateProcessTree } from "./process-platform.js";
+import { resolveAllowedPath } from "./roots.js";
 import type {
   LocalAgentDriver,
   LocalAgentRunCallbacks,
@@ -17,8 +22,10 @@ import type {
   LocalAgentRunResult,
   LocalAgentRuntime,
   LocalAgentRuntimeContext,
+  LocalAgentSandboxFallbackEvent,
+  LocalAgentSandboxMetadata,
   LocalAgentWriteMode,
-} from "./local-agent-runtime.js";
+} from "./local-agent-runtime-pool.js";
 
 export interface ResolvedCodexCommand {
   executable: string;
@@ -73,10 +80,164 @@ export function parseCodexVersion(output: string | undefined): string | undefine
   return match?.[1];
 }
 
+export const sandboxProbeTtlMs = 60_000;
+
+const LINUX_SANDBOX_PROBE_TIMEOUT_MS = 5_000;
+const LINUX_SANDBOX_PROBE_COMMAND = "unshare -Ur true";
+const MAX_SANDBOX_PROBE_STDERR_BYTES = 8 * 1024;
+
+type LinuxSandboxProbeOutcome = "ok" | "denied" | "indeterminate";
+
+export interface LinuxSandboxProbeResult {
+  outcome: LinuxSandboxProbeOutcome;
+  reason?: string;
+  code?: number | string;
+  signal?: string;
+  stderr?: string;
+}
+
+export interface LinuxSandboxProbeState {
+  outcome: LinuxSandboxProbeOutcome | "unknown";
+  at?: string;
+}
+
+export type ExecFileImplementation = typeof execFile;
+
+export interface ProbeLinuxUserNamespaceOptions {
+  ttlMs?: number;
+  sandboxProbeTtlMs?: number;
+  now?: () => number;
+}
+
+let linuxSandboxProbeCache: { result: LinuxSandboxProbeResult; at: number } | undefined;
+let linuxSandboxProbeInFlight: Promise<LinuxSandboxProbeResult> | undefined;
+let linuxSandboxProbeImplementation: ExecFileImplementation | undefined;
+let linuxSandboxProbeGeneration = 0;
+
+export function resetSandboxProbeCache(): void {
+  linuxSandboxProbeGeneration += 1;
+  linuxSandboxProbeCache = undefined;
+  linuxSandboxProbeInFlight = undefined;
+  linuxSandboxProbeImplementation = undefined;
+}
+
+export function getLinuxSandboxProbeState(): LinuxSandboxProbeState {
+  if (!linuxSandboxProbeCache) return { outcome: "unknown", at: undefined };
+  return {
+    outcome: linuxSandboxProbeCache.result.outcome,
+    at: new Date(linuxSandboxProbeCache.at).toISOString(),
+  };
+}
+
+export function probeLinuxUserNamespace(
+  execFileImpl: ExecFileImplementation = execFile,
+  options: ProbeLinuxUserNamespaceOptions = {},
+): Promise<LinuxSandboxProbeResult> {
+  if (process.platform !== "linux") return Promise.resolve({ outcome: "ok" });
+  const ttlMs = options.ttlMs ?? options.sandboxProbeTtlMs ?? sandboxProbeTtlMs;
+  const now = options.now ?? Date.now;
+  const cached = linuxSandboxProbeCache;
+  if (cached && linuxSandboxProbeImplementation === execFileImpl && now() - cached.at < ttlMs)
+    return Promise.resolve(cached.result);
+  if (linuxSandboxProbeInFlight) return linuxSandboxProbeInFlight;
+
+  linuxSandboxProbeImplementation = execFileImpl;
+  const generation = linuxSandboxProbeGeneration;
+  const probe = new Promise<LinuxSandboxProbeResult>((resolve) => {
+    let settled = false;
+    const finish = (result: LinuxSandboxProbeResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    try {
+      const child = execFileImpl("unshare", ["-Ur", "true"], {
+        timeout: LINUX_SANDBOX_PROBE_TIMEOUT_MS,
+        windowsHide: true,
+      }, (error, _stdout, stderr) => finish(classifySandboxProbeError(error, stderr)));
+      if (child && typeof (child as { then?: unknown }).then === "function") {
+        (child as unknown as Promise<unknown>).then(
+          () => finish({ outcome: "ok" }),
+          (error) => finish(classifySandboxProbeError(error)),
+        );
+      }
+    } catch (error) {
+      finish(classifySandboxProbeError(error));
+    }
+  });
+
+  const inFlight = probe
+    .then((result) => {
+      if (generation === linuxSandboxProbeGeneration) linuxSandboxProbeCache = { result, at: now() };
+      return result;
+    })
+    .finally(() => {
+      if (linuxSandboxProbeInFlight === inFlight) linuxSandboxProbeInFlight = undefined;
+    });
+  linuxSandboxProbeInFlight = inFlight;
+  return inFlight;
+}
+
+export const probeLinuxSandbox = probeLinuxUserNamespace;
+
+interface SandboxProbeErrorLike {
+  code?: number | string;
+  signal?: unknown;
+  timedOut?: boolean;
+  killed?: boolean;
+  stderr?: unknown;
+}
+
+function classifySandboxProbeError(error?: unknown, stderr?: string): LinuxSandboxProbeResult {
+  if (!error) return { outcome: "ok" };
+  const code = (error as SandboxProbeErrorLike)?.code;
+  if (code === "ENOENT") return { outcome: "indeterminate", reason: "not_found" };
+  const signal = typeof (error as SandboxProbeErrorLike)?.signal === "string" ? (error as SandboxProbeErrorLike).signal as string : undefined;
+  if ((error as SandboxProbeErrorLike)?.timedOut === true || code === "ETIMEDOUT" || ((error as SandboxProbeErrorLike)?.killed === true && (!signal || signal === "SIGTERM")))
+    return { outcome: "indeterminate", reason: "timeout" };
+  if (signal) return { outcome: "indeterminate", reason: `signal ${signal}` };
+  if (typeof code === "number") {
+    const capturedStderr = boundedProbeStderr(error as SandboxProbeErrorLike, stderr);
+    if (code === 1 && /Operation not permitted|\bEPERM\b/i.test(capturedStderr)) {
+      return {
+        outcome: "denied",
+        code,
+        ...(capturedStderr ? { stderr: capturedStderr } : {}),
+      };
+    }
+    return {
+      outcome: "indeterminate",
+      reason: `exit ${code}`,
+    };
+  }
+  if (code === "ENOENT") return { outcome: "indeterminate", reason: "not_found" };
+  return { outcome: "indeterminate", reason: "spawn_error" };
+}
+
+function boundedProbeStderr(error: { stderr?: unknown }, stderr?: string): string {
+  const value = stderr ?? error?.stderr;
+  if (value === undefined || value === null) return "";
+  const text = typeof value === "string" ? value : Buffer.isBuffer(value) ? value.toString("utf8") : String(value);
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= MAX_SANDBOX_PROBE_STDERR_BYTES) return text;
+  const marker = text.search(/Operation not permitted|\bEPERM\b/i);
+  const markerByte = marker < 0 ? -1 : Buffer.byteLength(text.slice(0, marker), "utf8");
+  const tailStart = bytes.length - MAX_SANDBOX_PROBE_STDERR_BYTES;
+  const start = markerByte < 0 ? tailStart : Math.min(markerByte, tailStart);
+  return bytes.subarray(start, start + MAX_SANDBOX_PROBE_STDERR_BYTES).toString("utf8");
+}
+
 export interface CodexAppServerRuntimeOptions {
   command: string;
   env: NodeJS.ProcessEnv;
   version?: string;
+  sandboxFallback?: "fail" | "worktree-embedded";
+  worktreeRoot?: string;
+  sandboxProbe?: () => Promise<LinuxSandboxProbeResult | boolean>;
+  onSandboxFallback?: (event: LocalAgentSandboxFallbackEvent) => void | Promise<void>;
+  sandboxProbeTtlMs?: number;
+  execFile?: ExecFileImplementation;
+  sandboxMode?: "auto" | "full-access";
 }
 
 export class CodexAppServerRuntime implements LocalAgentRuntime {
@@ -129,9 +290,23 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
             message: "Codex app-server is not running.",
           });
         }
+        const sandbox = await resolveCodexSandbox(input, {
+          ...this.options,
+          onSandboxFallback: async (event) => {
+            await callbacks?.onSandboxFallback?.(event);
+            try {
+              await this.options.onSandboxFallback?.(event);
+            } catch {
+              // Logging must never prevent a validated fallback from running.
+            }
+          },
+        });
+        const providerInput = sandbox.workspaceRoot
+          ? { ...input, workspaceRoot: sandbox.workspaceRoot }
+          : input;
         const threadResponse = await this.rpc.request(
-          input.providerSessionId ? "thread/resume" : "thread/start",
-          threadParams(input),
+          providerInput.providerSessionId ? "thread/resume" : "thread/start",
+          threadParams(providerInput, sandbox),
         );
         const threadId = readString(asRecord(threadResponse)?.thread, "id");
         if (!threadId) {
@@ -146,7 +321,7 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
         }
 
         await callbacks?.onSessionId?.(threadId);
-        const completed = await this.rpc.runTurn(threadId, turnParams(input, threadId));
+        const completed = await this.rpc.runTurn(threadId, turnParams(providerInput, threadId, sandbox));
         const parsed = parseCompletedTurn(completed.event.params, completed.items);
         if (parsed.failure) {
           throw new AgentProviderExecutionError({
@@ -173,6 +348,7 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
           providerSessionId: threadId,
           finalResponse: parsed.finalResponse.trim(),
           items: parsed.items,
+          ...(sandbox.metadata ? { metadata: sandbox.metadata } : {}),
         };
       },
     });
@@ -233,11 +409,35 @@ export class CodexLocalAgentDriver implements LocalAgentDriver {
 
   private commandResolved = false;
   private resolvedCommand?: ResolvedCodexCommand;
+  private readonly sandboxFallback: "fail" | "worktree-embedded";
+  private readonly worktreeRoot?: string;
+  private readonly sandboxProbe?: () => Promise<LinuxSandboxProbeResult | boolean>;
+  private readonly onSandboxFallback?: (event: LocalAgentSandboxFallbackEvent) => void | Promise<void>;
+  private readonly sandboxProbeTtlMs?: number;
+  private readonly execFile?: ExecFileImplementation;
+  private readonly sandboxMode: "auto" | "full-access";
 
   constructor(
     private readonly env: NodeJS.ProcessEnv = process.env,
     private readonly commandResolver: CodexCommandResolver = resolveCodexCommand,
-  ) {}
+    options: {
+      sandboxFallback?: "fail" | "worktree-embedded";
+      worktreeRoot?: string;
+      sandboxProbe?: () => Promise<LinuxSandboxProbeResult | boolean>;
+      onSandboxFallback?: (event: LocalAgentSandboxFallbackEvent) => void | Promise<void>;
+      sandboxProbeTtlMs?: number;
+      execFile?: ExecFileImplementation;
+      sandboxMode?: "auto" | "full-access";
+    } = {},
+  ) {
+    this.sandboxFallback = options.sandboxFallback ?? "fail";
+    this.sandboxMode = options.sandboxMode ?? "auto";
+    this.worktreeRoot = options.worktreeRoot;
+    this.sandboxProbe = options.sandboxProbe;
+    this.onSandboxFallback = options.onSandboxFallback;
+    this.sandboxProbeTtlMs = options.sandboxProbeTtlMs;
+    this.execFile = options.execFile;
+  }
 
   runtimeKey(_context: LocalAgentRuntimeContext): string {
     const command = this.resolveCommand();
@@ -274,6 +474,13 @@ export class CodexLocalAgentDriver implements LocalAgentDriver {
           command: command.executable,
           env: codexCommandEnvironment(this.env),
           version: command.version,
+          sandboxFallback: this.sandboxFallback,
+          worktreeRoot: this.worktreeRoot,
+          sandboxProbe: this.sandboxProbe,
+          onSandboxFallback: this.onSandboxFallback,
+          sandboxProbeTtlMs: this.sandboxProbeTtlMs,
+          execFile: this.execFile,
+          sandboxMode: this.sandboxMode,
         });
         try {
           await runtime.initialize();
@@ -451,22 +658,29 @@ class CodexAppServerRpc {
   }
 }
 
-function threadParams(input: LocalAgentRunInput): Record<string, unknown> {
+function threadParams(
+  input: LocalAgentRunInput,
+  sandbox: CodexSandboxResolution = normalCodexSandbox(input),
+): Record<string, unknown> {
   return {
     ...(input.providerSessionId ? { threadId: input.providerSessionId } : {}),
     cwd: input.workspaceRoot,
     approvalPolicy: "never",
-    sandbox: sandboxFor(input.writeMode),
+    sandbox: sandbox.sandbox,
     ...(input.model ? { model: input.model } : {}),
   };
 }
 
-function turnParams(input: LocalAgentRunInput, threadId: string): Record<string, unknown> {
+function turnParams(
+  input: LocalAgentRunInput,
+  threadId: string,
+  sandbox: CodexSandboxResolution = normalCodexSandbox(input),
+): Record<string, unknown> {
   return {
     threadId,
     input: [{ type: "text", text: input.prompt }],
     approvalPolicy: "never",
-    sandboxPolicy: sandboxPolicyFor(input.writeMode),
+    sandboxPolicy: sandbox.sandboxPolicy,
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
   };
@@ -488,6 +702,197 @@ function sandboxPolicyFor(writeMode: LocalAgentWriteMode | undefined): Record<st
     case "read_only":
     case undefined: return { type: "readOnly" };
   }
+}
+
+interface CodexSandboxResolution {
+  sandbox: string;
+  sandboxPolicy: Record<string, string>;
+  workspaceRoot?: string;
+  metadata?: LocalAgentSandboxMetadata;
+}
+
+interface ResolveCodexSandboxOptions {
+  sandboxMode?: "auto" | "full-access";
+  sandboxFallback?: "fail" | "worktree-embedded";
+  worktreeRoot?: string;
+  sandboxProbe?: () => Promise<LinuxSandboxProbeResult | boolean>;
+  execFile?: ExecFileImplementation;
+  sandboxProbeTtlMs?: number;
+  onSandboxFallback?: (event: LocalAgentSandboxFallbackEvent) => void | Promise<void>;
+}
+
+function normalCodexSandbox(input: LocalAgentRunInput): CodexSandboxResolution {
+  return {
+    sandbox: sandboxFor(input.writeMode),
+    sandboxPolicy: sandboxPolicyFor(input.writeMode),
+  };
+}
+
+export async function resolveCodexSandbox(
+  input: LocalAgentRunInput,
+  options: ResolveCodexSandboxOptions = {},
+): Promise<CodexSandboxResolution> {
+  const normal = normalCodexSandbox(input);
+  if (options.sandboxMode === "full-access") {
+    // Operator-explicit unsandboxed mode. Keep the same durable audit trail
+    // the sandbox-fallback path records (previouslyUnsandboxed metadata), so
+    // full-access turns are not indistinguishable from sandboxed ones.
+    const warning = "Codex is running WITHOUT an OS sandbox as the daemon account: unrestricted filesystem and network access. This is the operator-configured full-access sandbox mode for the codex provider.";
+    const metadata: LocalAgentSandboxMetadata = {
+      sandbox: "full-access",
+      warnings: [warning],
+    };
+    await options.onSandboxFallback?.({
+      provider: "codex",
+      workspaceRoot: input.workspaceRoot,
+      sandbox: "full-access",
+      warning,
+      metadata,
+    });
+    return {
+      sandbox: sandboxFor("full_access"),
+      sandboxPolicy: sandboxPolicyFor("full_access"),
+      metadata,
+    };
+  }
+
+  if (process.platform !== "linux" || normal.sandbox === "danger-full-access") return normal;
+
+  let probe: LinuxSandboxProbeResult;
+  try {
+    probe = options.sandboxProbe
+      ? normalizeSandboxProbe(await options.sandboxProbe())
+      : await probeLinuxUserNamespace(options.execFile, { ttlMs: options.sandboxProbeTtlMs });
+  } catch (cause) {
+    probe = classifySandboxProbeError(cause);
+  }
+
+  if (probe.outcome === "ok") return normal;
+
+  if (probe.outcome === "indeterminate") {
+    throw sandboxUnavailable({
+      stage: "probe",
+      detail: indeterminateProbeDetail(probe),
+      fallbackAvailable: false,
+      operation: "run",
+      retryable: true,
+    });
+  }
+
+  const fallbackEnabled = isSandboxFallbackEnabled(options.sandboxFallback);
+  if (!fallbackEnabled) {
+    throw sandboxUnavailable({
+      stage: "probe",
+      detail: deniedProbeDetail(probe),
+      fallbackAvailable: true,
+      operation: "run",
+      retryable: false,
+    });
+  }
+
+  if (normal.sandbox === "read-only") {
+    throw sandboxUnavailable({
+      stage: "policy",
+      detail: "read-only turns are not eligible for the unsandboxed fallback; fix user namespaces or run with write access.",
+      fallbackAvailable: false,
+      operation: "run",
+      retryable: false,
+    });
+  }
+
+  let workspaceRoot: string;
+  try {
+    workspaceRoot = resolveAllowedPath(
+      ".",
+      realpathSync(input.workspaceRoot),
+      options.worktreeRoot ? [options.worktreeRoot] : [],
+    );
+  } catch (cause) {
+    throw sandboxUnavailable({
+      stage: "worktree-confinement",
+      detail: "The no-OS-sandbox fallback requires the session cwd to resolve under the configured worktree root.",
+      fallbackAvailable: false,
+      operation: "run",
+      cause,
+    });
+  }
+
+  const warning = "Codex is running WITHOUT an OS sandbox as the daemon account: unrestricted filesystem and network access. The worktree check authorized only the starting directory; it does not confine execution. Enable this fallback for trusted workloads only.";
+  const metadata: LocalAgentSandboxMetadata = {
+    sandbox: "worktree-embedded",
+    warnings: [warning],
+  };
+  await options.onSandboxFallback?.({
+    provider: "codex",
+    workspaceRoot,
+    sandbox: metadata.sandbox,
+    warning,
+    metadata,
+  });
+  return {
+    sandbox: sandboxFor("full_access"),
+    sandboxPolicy: sandboxPolicyFor("full_access"),
+    workspaceRoot,
+    metadata,
+  };
+}
+
+function normalizeSandboxProbe(value: LinuxSandboxProbeResult | boolean): LinuxSandboxProbeResult {
+  if (value === true) return { outcome: "ok" };
+  if (value === false) return { outcome: "denied" };
+  if (value && typeof value === "object" && (value.outcome === "ok" || value.outcome === "denied" || value.outcome === "indeterminate")) {
+    return {
+      outcome: value.outcome,
+      ...(value.reason === undefined ? {} : { reason: value.reason }),
+      ...(value.code === undefined ? {} : { code: value.code }),
+      ...(value.signal === undefined ? {} : { signal: value.signal }),
+      ...(value.stderr === undefined ? {} : { stderr: boundedProbeStderr({}, value.stderr) }),
+    };
+  }
+  return { outcome: "indeterminate", reason: "spawn_error" };
+}
+
+function indeterminateProbeDetail(probe: LinuxSandboxProbeResult): string {
+  switch (probe.reason) {
+    case "not_found":
+      return `Linux user namespace probe could not run: unshare not found in PATH (probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+    case "timeout":
+      return `Linux user namespace probe timed out after ${LINUX_SANDBOX_PROBE_TIMEOUT_MS}ms (probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+    default:
+      if (probe.reason?.startsWith("exit ") || probe.reason?.startsWith("signal ")) {
+        return `Linux user namespace probe failed (${probe.reason}; probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+      }
+      return `Linux user namespace probe could not start (spawn error; probe command: ${LINUX_SANDBOX_PROBE_COMMAND}).`;
+  }
+}
+
+function deniedProbeDetail(probe: LinuxSandboxProbeResult): string {
+  const status = probe.code === undefined ? "failed" : `exited with code ${String(probe.code)}`;
+  const signal = probe.signal ? ` (signal ${probe.signal})` : "";
+  const stderr = typeof probe.stderr === "string" && probe.stderr.trim() ? ` stderr: ${JSON.stringify(probe.stderr.trim())}` : "";
+  return `Linux user namespace probe denied: ${LINUX_SANDBOX_PROBE_COMMAND} ${status}${signal}.${stderr} set subagents.sandboxFallback to "worktree-embedded" to permit unsandboxed execution from an eligible worktree. after host fixes run: devspace agents daemon stop`;
+}
+
+function sandboxUnavailable(fields: {
+  stage: string;
+  detail: string;
+  fallbackAvailable: boolean;
+  operation: string;
+  retryable?: boolean;
+  cause?: unknown;
+}): AgentSandboxUnavailableError {
+  return new AgentSandboxUnavailableError({
+    code: "SANDBOX_UNAVAILABLE",
+    provider: "codex",
+    backend: "linux-user-namespace",
+    stage: fields.stage,
+    detail: fields.detail,
+    operation: fields.operation,
+    retryable: fields.retryable ?? false,
+    fallbackAvailable: fields.fallbackAvailable,
+    cause: fields.cause,
+    message: fields.detail,
+  });
 }
 
 function parseCompletedTurn(params: unknown, items: unknown[]): {
@@ -570,10 +975,6 @@ function protocolErrorText(value: unknown): string {
   const message = directString(record.message);
   const code = record.code;
   return message ? `codex app-server${code === undefined ? "" : ` ${String(code)}`}: ${message}` : String(value);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function appendTail(value: string, chunk: string, maxBytes: number): string {
