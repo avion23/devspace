@@ -152,7 +152,7 @@ instructions".
 ## Releases (`scripts/`)
 
 - `dist/fork-revision.js` holds the revision reported by the daemon
-  (`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r20`).
+  (`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r21`).
 - `scripts/release.sh rN` cuts a release from a clean `main` equal to
   `origin/main`: bumps the revision in `dist/fork-revision.js`, `README.md`,
   `PATCHES.md` and `docs/local-agent-daemon.md`, runs `npm ci`, `npm test`
