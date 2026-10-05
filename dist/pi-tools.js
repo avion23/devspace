@@ -1,4 +1,5 @@
-import { constants, createReadStream, linkSync, lstatSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { constants, createReadStream, linkSync, lstatSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { dirname } from "node:path";
 import { access } from "node:fs/promises";
 import { finished } from "node:stream/promises";
 import { createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead, } from "@earendil-works/pi-coding-agent";
@@ -253,6 +254,11 @@ export async function movePathTool(input, context) {
         if (existing) {
             return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
         }
+        // Create the destination's parent directory tree (already confined to
+        // the validated workspace path by resolveAllowedPath above), mirroring
+        // the write tool's recursive mkdir so a move into a new module
+        // directory does not fail with a misleading ENOENT naming the source.
+        mkdirSync(dirname(to), { recursive: true });
         // Atomic no-replace: link(2) fails with EEXIST if `to` appears between
         // the check and the mutation, which rename(2) would silently replace.
         // On Linux link(2) does not dereference symlinks, so a moved symlink
@@ -268,7 +274,14 @@ export async function movePathTool(input, context) {
                 return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
             }
             if (error.code === "EXDEV") {
-                if (lstatSync(to)) {
+                let destExists = true;
+                try {
+                    lstatSync(to);
+                }
+                catch {
+                    destExists = false;
+                }
+                if (destExists) {
                     return fileMutationError(`${to} already exists; move never overwrites.`);
                 }
                 renameSync(from, to);

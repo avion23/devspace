@@ -31,7 +31,12 @@ not a backup file on disk.
 - `move` (`movePathTool`): root-validates `from`/`to`, refuses directories and
   any existing destination (including dangling symlinks), and is atomic via
   `link(2)` + `unlink` (no lstat-then-rename race); falls back to checked
-  `rename` on `EXDEV`.
+  `rename` on `EXDEV`. Creates the destination's parent directories
+  recursively (like `write`) before linking, so a move into a new module
+  directory does not fail with a misleading ENOENT naming the source; the
+  `EXDEV` fallback's existence check is a caught-`lstatSync` boolean, not a
+  truthy-return predicate (`lstatSync` throws rather than returning falsy, so
+  the old check made that branch unreachable).
 - `repo_status` (`dist/server.js`): one read-only call returning `{branch,
   detached, head, upstream, ahead, behind, dirtyCount, dirtyPaths, branchLine,
   worktrees}` via `git -C <root>`, replacing repeated shell `git`
