@@ -14,7 +14,7 @@ export interface LocalAgentSandboxMetadata extends Record<string, unknown> {
   warnings: string[];
 }
 
-export interface LocalAgentSandboxFallbackEvent {
+export interface LocalAgentSandboxFallbackEvent extends Record<string, unknown> {
   provider: LocalAgentProvider;
   workspaceRoot: string;
   sandbox: "full-access" | "worktree-embedded";

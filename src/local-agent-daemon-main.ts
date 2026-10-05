@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import { readFileSync } from "node:fs";
 import { loadConfig } from "./config.js";
 import { createLocalAgentDrivers } from "./local-agent-adapters.js";
+import { getLinuxSandboxProbeState } from "./local-agent-codex.js";
 import { loadLocalAgentProfiles } from "./local-agent-profiles.js";
 import { LocalAgentDaemon, writeLocalAgentDaemonLog } from "./local-agent-daemon.js";
 import {
@@ -10,8 +12,10 @@ import {
 import { LocalAgentManager } from "./local-agent-manager.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
+import { FORK_REVISION } from "./fork-revision.js";
 
 const config = loadConfig();
+const daemonBuildVersion = `${readPackageVersion()}-${FORK_REVISION}`;
 const DEFAULT_DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 const paths = localAgentDaemonPaths(config.stateDir);
 const log = (
@@ -20,9 +24,15 @@ const log = (
   fields: Record<string, unknown>,
 ) => writeLocalAgentDaemonLog(paths, level, event, fields);
 const store = new LocalAgentStore(paths.stateDir);
+const drivers = createLocalAgentDrivers({
+  sandboxFallback: config.subagents.sandboxFallback,
+  worktreeRoot: config.worktreeRoot,
+  onSandboxFallback: (fields) => log("warn", "codex_sandbox_fallback", fields),
+  codexSandboxMode: config.subagents.providers.find((entry) => entry.id === "codex")?.sandboxMode ?? "auto",
+});
 const manager = new LocalAgentManager({
   store,
-  drivers: createLocalAgentDrivers(),
+  drivers,
   pool: new LocalAgentRuntimePool({ logger: log }),
   loadProfiles: (workspaceRoot) => loadLocalAgentProfiles(config, workspaceRoot, { includeDisabled: true }),
   agentDir: config.agentDir,
@@ -39,6 +49,9 @@ const daemon = new LocalAgentDaemon({
   },
   onClosed: () => { if (!shuttingDown) process.exit(0); },
   idleShutdownMs: parseIdleShutdownMs(process.env.DEVSPACE_AGENTD_IDLE_TIMEOUT_MS),
+  buildVersion: daemonBuildVersion,
+  sandboxFallback: config.subagents.sandboxFallback,
+  getSandboxProbeState: getLinuxSandboxProbeState,
 });
 
 let shuttingDown = false;
@@ -89,4 +102,13 @@ function parseShutdownTimeoutMs(value: string | undefined): number {
     throw new Error("DEVSPACE_AGENTD_SHUTDOWN_TIMEOUT_MS must be a non-negative duration.");
   }
   return parsed;
+}
+
+function readPackageVersion(): string {
+  try {
+    const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    return typeof packageJson.version === "string" && packageJson.version.trim() ? packageJson.version : "unknown";
+  } catch {
+    return "unknown";
+  }
 }
