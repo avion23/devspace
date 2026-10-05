@@ -47,7 +47,7 @@ export interface LocalAgentSettings {
 }
 
 export function resolveLocalAgentSettings(
-  provider: LocalAgentProvider,
+  provider: string,
   model?: string,
   effort?: string,
 ): LocalAgentSettings {

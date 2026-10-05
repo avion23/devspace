@@ -9,7 +9,7 @@ import type { LocalAgentProvider } from "./local-agent-profiles.js";
 
 export type LocalAgentWriteMode = "read_only" | "allowed" | "full_access";
 
-export interface LocalAgentSandboxMetadata {
+export interface LocalAgentSandboxMetadata extends Record<string, unknown> {
   sandbox: "full-access" | "worktree-embedded";
   warnings: string[];
 }

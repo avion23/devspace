@@ -75,33 +75,28 @@ export class AgentProviderExecutionError extends TaggedError(
   "AgentProviderExecutionError",
 )<AgentProviderErrorFields & { code: "PROVIDER_EXECUTION_ERROR" }>() {}
 
+interface AgentSandboxUnavailableErrorFields extends Record<string, unknown> {
+  agentId?: string;
+  operation: string;
+  retryable: boolean;
+  cause?: unknown;
+  message: string;
+  code: "SANDBOX_UNAVAILABLE";
+  provider?: LocalAgentProvider;
+  backend?: string;
+  stage?: string;
+  detail?: string;
+  fallbackAvailable?: boolean;
+  fallback_available?: boolean;
+}
+
 export class AgentSandboxUnavailableError extends TaggedError(
   "AgentSandboxUnavailableError",
-)<
-  Omit<AgentProviderErrorFields, "provider"> & {
-    code: "SANDBOX_UNAVAILABLE";
-    provider?: LocalAgentProvider;
-    backend?: string;
-    stage?: string;
-    detail?: string;
-    fallbackAvailable?: boolean;
-    fallback_available?: boolean;
-  }
->() {
-  constructor(
-    fields: Omit<AgentProviderErrorFields, "provider" | "fallbackAvailable" | "fallback_available"> & {
-      code: "SANDBOX_UNAVAILABLE";
-      provider?: LocalAgentProvider;
-      backend?: string;
-      stage?: string;
-      detail?: string;
-      fallbackAvailable?: boolean;
-      fallback_available?: boolean;
-    },
-  ) {
+)<AgentSandboxUnavailableErrorFields>() {
+  constructor(fields: AgentSandboxUnavailableErrorFields) {
     const fallbackAvailable = fields.fallbackAvailable ?? fields.fallback_available ?? false;
     super({ ...fields, fallbackAvailable });
-    this.fallback_available = fallbackAvailable;
+    (this as { fallback_available: boolean }).fallback_available = fallbackAvailable;
   }
 }
 
