@@ -52,6 +52,10 @@ import {
 } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+// pi-tools.js is a leaf (imports roots.js + pi-coding-agent only): no cycle.
+// Imported here so the production serve() path can log the effective bash
+// timeout values without eagerly loading the heavy server module.
+import { BASH_TOOL_DEFAULT_TIMEOUT_SECONDS, BASH_TOOL_MAX_TIMEOUT_SECONDS } from "./pi-tools.js";
 
 type Command = "serve" | "init" | "doctor" | "config" | "agents" | "help" | "version";
 const require = createRequire(import.meta.url);
@@ -273,6 +277,7 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
 }
 
 async function serve(): Promise<void> {
+  process.title = "devspace-serve";
   const sqliteStatus = checkSqliteNative();
   if (sqliteStatus !== "ok") {
     throw new Error(
@@ -289,7 +294,11 @@ async function serve(): Promise<void> {
   const { createServer } = await import("./server.js");
   const config = loadConfig();
   const { app, close, localAgentProviders } = createServer(config);
-  const httpServer = app.listen(config.port, config.host, () => {
+  const httpServer = app.listen(config.port, config.host, (error?: Error) => {
+    if (error) {
+      console.error(`devspace could not listen on ${config.host}:${config.port}: ${error.message}`);
+      process.exit(1);
+    }
     console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
     console.log(`public base url: ${config.publicBaseUrl}`);
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
@@ -300,6 +309,7 @@ async function serve(): Promise<void> {
     console.log("auth: Owner password approval required");
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
     console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
+    console.log(`bash timeout: default ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}s, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}s`);
   });
 
   let shuttingDown = false;
@@ -392,7 +402,7 @@ function printHelp(): void {
       "  devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] <prompt>",
       "  devspace agents continue <id> [--model <model>] [--effort <level>] <prompt>",
       "  devspace agents show <id>",
-      "  devspace agents daemon <status|stop|logs>",
+      "  devspace agents daemon <status|stop|logs> [--force]",
       "  devspace -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",
@@ -542,24 +552,27 @@ async function runAgentsShow(args: string[], json: boolean): Promise<void> {
 
 async function runAgentsDaemon(args: string[], json: boolean): Promise<void> {
   const [subcommand, ...extra] = args;
-  if (extra.length > 0) throw new Error("Usage: devspace agents daemon <status|stop|logs> [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
   switch (subcommand) {
     case "status": {
+      if (extra.length > 0) throw new Error("Usage: devspace agents daemon status [--json]");
       const status = presentAgentResult(await client.status(), json);
       if (!status) return;
       printJson(status);
       return;
     }
     case "stop": {
-      const status = presentAgentResult(await client.stop(), json);
+      const force = extra.length === 1 && extra[0] === "--force";
+      if (extra.length > 0 && !force) throw new Error("Usage: devspace agents daemon stop [--force] [--json]");
+      const status = presentAgentResult(await client.stop(force), json);
       if (!status) return;
       if (json) printJson(status);
       else console.log("Local agent daemon stop requested.");
       return;
     }
     case "logs": {
+      if (extra.length > 0) throw new Error("Usage: devspace agents daemon logs [--json]");
       const logs = presentAgentResult(await client.logs(), json);
       if (logs === undefined) return;
       if (json) printJson({ logs });
@@ -567,7 +580,7 @@ async function runAgentsDaemon(args: string[], json: boolean): Promise<void> {
       return;
     }
     default:
-      throw new Error("Usage: devspace agents daemon <status|stop|logs>");
+      throw new Error("Usage: devspace agents daemon <status|stop|logs> [--force]");
   }
 }
 
@@ -622,7 +635,9 @@ function printAgentsHelp(): void {
       "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
       "  devspace agents show <id> [--json]",
       "  devspace agents targets [--json]",
-      "  devspace agents daemon <status|stop|logs> [--json]",
+      "  devspace agents daemon status [--json]",
+      "  devspace agents daemon stop [--force] [--json]",
+      "  devspace agents daemon logs [--json]",
     ].join("\n"),
   );
 }
