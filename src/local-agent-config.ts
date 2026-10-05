@@ -79,7 +79,7 @@ export function isSubagentProviderEnabled(
   return config.enabled && subagentProviderConfig(config, provider)?.enabled === true;
 }
 
-export function isSandboxFallbackEnabled(value: SubagentsConfig["sandboxFallback"]): boolean {
+export function isSandboxFallbackEnabled(value: SubagentsConfig["sandboxFallback"] | undefined): boolean {
   return value === "worktree-embedded";
 }
 
