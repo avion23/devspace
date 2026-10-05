@@ -1,4 +1,4 @@
-import { constants, createReadStream, linkSync, lstatSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { constants, createReadStream, linkSync, lstatSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { access } from "node:fs/promises";
 import { finished } from "node:stream/promises";
@@ -246,11 +246,7 @@ export async function movePathTool(input, context) {
         if (st.isDirectory()) {
             return fileMutationError(`${from} is a directory; move only renames files and symlinks. Use the bash tool with mv for directories.`);
         }
-        let existing = null;
-        try {
-            existing = lstatSync(to);
-        }
-        catch { }
+        const existing = lstatSync(to, { throwIfNoEntry: false });
         if (existing) {
             return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
         }
@@ -263,9 +259,7 @@ export async function movePathTool(input, context) {
         // the check and the mutation, which rename(2) would silently replace.
         // On Linux link(2) does not dereference symlinks, so a moved symlink
         // stays a symlink. Crash between link and unlink leaves both names
-        // pointing at the same inode (recoverable, no data loss). On EXDEV
-        // (cross-device, possible only if a mount point sits inside the
-        // workspace) fall back to checked rename.
+        // pointing at the same inode (recoverable, no data loss).
         try {
             linkSync(from, to);
         }
@@ -274,21 +268,9 @@ export async function movePathTool(input, context) {
                 return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
             }
             if (error.code === "EXDEV") {
-                let destExists = true;
-                try {
-                    lstatSync(to);
-                }
-                catch {
-                    destExists = false;
-                }
-                if (destExists) {
-                    return fileMutationError(`${to} already exists; move never overwrites.`);
-                }
-                renameSync(from, to);
+                return fileMutationError(`${from} and ${to} are on different filesystems; move only links within one filesystem. Use the bash tool with mv.`);
             }
-            else {
-                throw error;
-            }
+            throw error;
         }
         unlinkSync(from);
         return { content: [{ type: "text", text: `Moved ${from} (${st.size} bytes) to ${to}` }] };
