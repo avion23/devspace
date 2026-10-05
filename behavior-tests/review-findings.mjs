@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import {
-  existsSync,
-  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,12 +10,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  deletePathsTool,
   editFileTool,
   findFilesTool,
   grepFilesTool,
   listDirectoryTool,
-  movePathTool,
   readFileTool,
   writeFileTool,
 } from "../dist/pi-tools.js";
@@ -70,16 +66,4 @@ assert.equal(insideRead.content[0].text.includes("inside"), true);
 const created = await writeFileTool({ path: "created.txt", content: "created\n" }, context);
 assert.equal(created.isError, undefined);
 
-symlinkSync(outsideFile, join(root, "delete-link"));
-const deleted = await deletePathsTool({ paths: ["delete-link"] }, context);
-assert.equal(deleted.isError, undefined);
-assert.equal(existsSync(join(root, "delete-link")), false);
-assert.equal(readFileSync(outsideFile, "utf8"), "outside\n");
-
-symlinkSync(outsideFile, join(root, "move-link"));
-const moved = await movePathTool({ from: "move-link", to: "moved-link" }, context);
-assert.equal(moved.isError, undefined);
-assert.equal(lstatSync(join(root, "moved-link")).isSymbolicLink(), true);
-assert.equal(readFileSync(outsideFile, "utf8"), "outside\n");
-
-console.log("review findings: PASS (final symlink confinement, leaf delete/move)");
+console.log("review findings: PASS (final symlink confinement)");

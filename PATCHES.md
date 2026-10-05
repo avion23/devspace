@@ -13,8 +13,7 @@ not a backup file on disk.
   lexical and realpathed root. This blocks intermediate-symlink escapes
   (`workspace/evil -> /etc`) for every tool, not only destructive ones.
 - Read, write, and edit follow the final path segment's symlink only after
-  containment is validated (`followFinal`); `delete` and `move` use leaf
-  semantics (`lstat`/`link(2)`) and operate on the link itself.
+  containment is validated (`followFinal`).
 - `read` additionally permits the exact file `~/.claude/CLAUDE.md` (operator's
   global Claude instructions) in every tool mode, with no directory, sibling,
   or symlink-redirected access, and no write access.
@@ -29,13 +28,8 @@ not a backup file on disk.
 
 ## File tools (`dist/pi-tools.js`, registered from `dist/server.js`)
 
-- `delete` and `move` (`deletePathsTool`, `movePathTool`) have been removed
-  from `dist/pi-tools.js`; use the `bash` tool (`rm`, `mv`) instead.
-- `repo_status` (`dist/server.js`): one read-only call returning `{branch,
-  detached, head, upstream, ahead, behind, dirtyCount, dirtyPaths, branchLine,
-  worktrees}` via `git -C <root>`, replacing repeated shell `git`
-  reconstruction. Runs with `--no-optional-locks` and fsmonitor disabled;
-  handles an unborn `HEAD`; caps `worktrees` at 50.
+- `delete`, `move` and `repo_status` are removed; use the `bash` tool
+  (`rm`, `mv`, `git status`) instead.
 - `bash` (`dist/server.js`, timeout constants from `dist/pi-tools.js`):
   default timeout 300s when the caller omits one, max 900s.
   `exec_command`/`write_stdin` are available in every tool mode for
@@ -49,8 +43,11 @@ not a backup file on disk.
   server, closed when the response ends. ChatGPT opens one MCP session per
   tool call, so durable state is keyed by `workspaceId` and process
   `sessionId` only. `GET`/`DELETE /mcp` return 405.
-- Tool results carry the output text once, in `content`; `structuredContent`
-  holds only small typed metadata.
+- Every tool's `structuredContent` carries a `result` field (same text as
+  `content`, via `resultOutputSchema()`/`outputSchema`) alongside its other
+  typed metadata, so hosts that only read `structuredContent` (e.g. ChatGPT,
+  which does this whenever a tool declares an `outputSchema`) still get the
+  model-readable text.
 - `http_response_incomplete` is logged (request id, path, status, duration;
   no bodies or credentials) when a response closes before completion.
 - `trust proxy` defaults to one hop (`DEVSPACE_TRUST_PROXY=0` disables it).
@@ -89,8 +86,7 @@ not a backup file on disk.
   and the suffixed `/.well-known/oauth-authorization-server/mcp`, in addition
   to the RFC 9728/8414 paths the SDK serves natively. A GET-only `req.url`
   rewrite aliases both to the canonical SDK handler before
-  `mcpAuthMetadataRouter` runs (no auth/token logic change). Reapply after an
-  upstream-overwriting reinstall with `scripts/reapply-wellknown-aliases.sh`.
+  `mcpAuthMetadataRouter` runs (no auth/token logic change).
 
 ## Codex-only subagents (`dist/local-agent-*.js`)
 

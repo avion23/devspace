@@ -105,8 +105,7 @@ function sanitizePathSegment(value) {
         .replace(/^-+|-+$/g, "")
         .slice(0, 80);
 }
-// Default budget mirrors the 10s execFile timeout already used for repo_status
-// in server.js. `worktree add` on a large real repo (polymarket-arbitrage,
+// `worktree add` on a large real repo (polymarket-arbitrage,
 // 1.3GB .git, 1755 branches) measured well under 1s; 15s leaves a wide margin
 // while keeping the call bounded well inside the ~30s tool-call yield window.
 const DEFAULT_GIT_TIMEOUT_MS = 10_000;
