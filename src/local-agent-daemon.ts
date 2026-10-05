@@ -77,8 +77,13 @@ export interface LocalAgentDaemonOptions {
   onClosed?: () => void;
   buildVersion?: string;
   sandboxFallback?: LocalAgentDaemonSandboxFallback;
-  getSandboxProbeState?: () => LocalAgentSandboxProbeState | undefined;
+  getSandboxProbeState?: () => SandboxProbeStateInput | undefined;
 }
+
+type SandboxProbeStateInput = {
+  outcome: LocalAgentSandboxProbeState["outcome"];
+  at?: string;
+};
 
 export class LocalAgentDaemon {
   readonly paths: LocalAgentDaemonPaths;
@@ -103,7 +108,7 @@ export class LocalAgentDaemon {
   private ownsLock = false;
   private readonly buildVersion: string;
   private readonly sandboxFallback: LocalAgentDaemonSandboxFallback;
-  private readonly getSandboxProbeState?: () => LocalAgentSandboxProbeState | undefined;
+  private readonly getSandboxProbeState?: () => SandboxProbeStateInput | undefined;
 
   constructor(options: LocalAgentDaemonOptions) {
     this.paths = options.paths ?? localAgentDaemonPaths(options.stateDir);
@@ -496,7 +501,7 @@ function unwrapManagerResult<T, E>(result: Result<T, E>): T {
 }
 
 function normalizeSandboxProbeState(
-  state: LocalAgentSandboxProbeState | undefined,
+  state: SandboxProbeStateInput | undefined,
   fallbackAt: string,
 ): LocalAgentSandboxProbeState {
   const outcome = state?.outcome;
