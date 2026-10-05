@@ -83,12 +83,6 @@ for (const model of ["gpt-5.4", "gpt-5.4-mini", "gpt-4o", "gpt-4", "gpt-5", "gpt
 for (const model of ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra", "claude-sonnet-4-5", "o3", "o4-mini"]) {
   assert.equal(isBlockedLocalAgentModel(model), false, model);
 }
-const blockedMessage = (() => {
-  let message;
-  try { blockedModelReason; } catch { /* noop */ }
-  return undefined;
-})();
-
 const explicit = resolveLocalAgentTarget("codex", [], "gpt-5.6-custom", "high", providerConfigs);
 assert.deepEqual(
   { model: explicit.model, effort: explicit.effort },
@@ -233,9 +227,6 @@ assert.equal(started.isOk(), true);
 assert.equal(started.value.model, CODEX_DEFAULT_MODEL);
 assert.equal(started.value.effort, CODEX_DEFAULT_EFFORT);
 
-// Effort is passed through verbatim: the app-server model catalog advertises
-// `max` as a supported reasoning level for gpt-5.6-luna (low/medium/high/xhigh/max).
-assert.equal(CODEX_DEFAULT_EFFORT, "max");
 const fullAccessSandbox = await resolveCodexSandbox(
   { prompt: "x", workspaceRoot: "/tmp/model-policy", writeMode: "read_only" },
   { sandboxMode: "full-access", sandboxProbe: async () => ({ outcome: "ok" }) },

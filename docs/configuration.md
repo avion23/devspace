@@ -245,16 +245,16 @@ skill teaches the model to use only the minimal `devspace agents ls`,
 `devspace agents targets`, `devspace agents run`, `devspace agents continue`,
 and `devspace agents show` workflow.
 
-For Codex, Claude Code, OpenCode, Pi, or another supported Coding Agent, use
-the Skills CLI to install the same skill. DevSpace setup prints this command but
-does not run it or write into agent skill directories:
+This fork supports only the `codex` provider. Use the Skills CLI to install
+the same skill into Codex. DevSpace setup prints this command but does not run
+it or write into agent skill directories:
 
 ```bash
 npx skills add Waishnav/devspace --skill subagents --global
 ```
 
-Starter profile templates are available under `examples/agents/`. Copy or adapt
-them into one of the active profile directories before use.
+Starter profile templates for `codex` are available under `examples/agents/`.
+Copy or adapt them into one of the active profile directories before use.
 
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 
