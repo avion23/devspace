@@ -14,7 +14,8 @@ export type AgentTargetErrorCode =
   | "AGENT_NOT_FOUND"
   | "PROVIDER_DISABLED"
   | "PROVIDER_NOT_CONFIGURED"
-  | "TARGET_RESOLUTION_FAILED";
+  | "TARGET_RESOLUTION_FAILED"
+  | "MODEL_BLOCKED";
 
 export class AgentTargetError extends TaggedError("AgentTargetError")<{
   code: AgentTargetErrorCode;
@@ -74,22 +75,58 @@ export class AgentProviderExecutionError extends TaggedError(
   "AgentProviderExecutionError",
 )<AgentProviderErrorFields & { code: "PROVIDER_EXECUTION_ERROR" }>() {}
 
+export class AgentSandboxUnavailableError extends TaggedError(
+  "AgentSandboxUnavailableError",
+)<
+  Omit<AgentProviderErrorFields, "provider"> & {
+    code: "SANDBOX_UNAVAILABLE";
+    provider?: LocalAgentProvider;
+    backend?: string;
+    stage?: string;
+    detail?: string;
+    fallbackAvailable?: boolean;
+    fallback_available?: boolean;
+  }
+>() {
+  constructor(
+    fields: Omit<AgentProviderErrorFields, "provider" | "fallbackAvailable" | "fallback_available"> & {
+      code: "SANDBOX_UNAVAILABLE";
+      provider?: LocalAgentProvider;
+      backend?: string;
+      stage?: string;
+      detail?: string;
+      fallbackAvailable?: boolean;
+      fallback_available?: boolean;
+    },
+  ) {
+    const fallbackAvailable = fields.fallbackAvailable ?? fields.fallback_available ?? false;
+    super({ ...fields, fallbackAvailable });
+    this.fallback_available = fallbackAvailable;
+  }
+}
+
 export type AgentProviderError =
   | AgentProviderUnavailableError
   | AgentProviderCancelledError
   | AgentProviderProtocolError
-  | AgentProviderExecutionError;
+  | AgentProviderExecutionError
+  | AgentSandboxUnavailableError;
 
 interface AgentDaemonErrorFields extends Record<string, unknown> {
   operation: string;
   retryable: boolean;
   cause?: unknown;
   message: string;
+  activeTurns?: number;
 }
 
 export class AgentDaemonUnavailableError extends TaggedError(
   "AgentDaemonUnavailableError",
 )<AgentDaemonErrorFields & { code: "DAEMON_UNAVAILABLE" }>() {}
+
+export class AgentDaemonBusyError extends TaggedError(
+  "AgentDaemonBusyError",
+)<AgentDaemonErrorFields & { code: "DAEMON_BUSY" }>() {}
 
 export class AgentDaemonStartupError extends TaggedError(
   "AgentDaemonStartupError",
@@ -121,6 +158,7 @@ export class AgentDaemonInternalError extends TaggedError(
 
 export type AgentDaemonError =
   | AgentDaemonUnavailableError
+  | AgentDaemonBusyError
   | AgentDaemonStartupError
   | AgentDaemonTimeoutError
   | AgentDaemonProtocolMismatchError
@@ -165,17 +203,24 @@ export interface AgentErrorPayload {
   workspaceId?: string;
   operation?: string;
   target?: string;
+  backend?: string;
+  stage?: string;
+  detail?: string;
+  fallback_available?: boolean;
+  activeTurns?: number;
 }
 
 export function isAgentProviderError(error: unknown): error is AgentProviderError {
   return AgentProviderUnavailableError.is(error)
     || AgentProviderCancelledError.is(error)
     || AgentProviderProtocolError.is(error)
-    || AgentProviderExecutionError.is(error);
+    || AgentProviderExecutionError.is(error)
+    || AgentSandboxUnavailableError.is(error);
 }
 
 export function isAgentDaemonError(error: unknown): error is AgentDaemonError {
   return AgentDaemonUnavailableError.is(error)
+    || AgentDaemonBusyError.is(error)
     || AgentDaemonStartupError.is(error)
     || AgentDaemonTimeoutError.is(error)
     || AgentDaemonProtocolMismatchError.is(error)
@@ -190,6 +235,7 @@ export function isLocalAgentError(error: unknown): error is LocalAgentError {
     || AgentConflictError.is(error)
     || AgentScopeError.is(error)
     || isAgentProviderError(error)
+    || AgentSandboxUnavailableError.is(error)
     || AgentStoreError.is(error)
     || isAgentDaemonError(error);
 }
@@ -203,7 +249,9 @@ export function toAgentErrorPayload(error: LocalAgentError): AgentErrorPayload {
     AgentProviderCancelledError: providerErrorPayload,
     AgentProviderProtocolError: providerErrorPayload,
     AgentProviderExecutionError: providerErrorPayload,
+    AgentSandboxUnavailableError: sandboxErrorPayload,
     AgentDaemonUnavailableError: daemonErrorPayload,
+    AgentDaemonBusyError: daemonErrorPayload,
     AgentDaemonStartupError: daemonErrorPayload,
     AgentDaemonTimeoutError: daemonErrorPayload,
     AgentDaemonProtocolMismatchError: daemonErrorPayload,
@@ -224,6 +272,11 @@ export function agentErrorFromPayload(payload: {
   workspaceId?: string;
   operation?: string;
   target?: string;
+  backend?: string;
+  stage?: string;
+  detail?: string;
+  fallback_available?: boolean;
+  activeTurns?: number;
 }): LocalAgentError | undefined {
   const retryable = payload.retryable ?? false;
   const provider = payload.provider && isLocalAgentProvider(payload.provider)
@@ -235,6 +288,7 @@ export function agentErrorFromPayload(payload: {
     case "PROVIDER_DISABLED":
     case "PROVIDER_NOT_CONFIGURED":
     case "TARGET_RESOLUTION_FAILED":
+    case "MODEL_BLOCKED":
       return new AgentTargetError({
         code: payload.code,
         target: payload.target ?? payload.agentId ?? payload.provider ?? "unknown",
@@ -285,12 +339,33 @@ export function agentErrorFromPayload(payload: {
       }
       return new AgentProviderExecutionError({ code: payload.code, ...fields });
     }
+    case "SANDBOX_UNAVAILABLE":
+      return new AgentSandboxUnavailableError({
+        code: payload.code,
+        backend: payload.backend,
+        stage: payload.stage,
+        detail: payload.detail,
+        fallbackAvailable: payload.fallback_available,
+        provider,
+        agentId: payload.agentId,
+        operation: payload.operation ?? "run",
+        retryable,
+        message: payload.message,
+      });
     case "AGENT_STORE_ERROR":
       return new AgentStoreError(payload.operation ?? "request", undefined, payload.message);
     case "DAEMON_UNAVAILABLE":
       return new AgentDaemonUnavailableError({
         code: payload.code,
         operation: payload.operation ?? "request",
+        retryable,
+        message: payload.message,
+      });
+    case "DAEMON_BUSY":
+      return new AgentDaemonBusyError({
+        code: payload.code,
+        activeTurns: payload.activeTurns,
+        operation: payload.operation ?? "daemon.stop",
         retryable,
         message: payload.message,
       });
@@ -411,6 +486,10 @@ export async function captureAgentProviderResult<T>(input: {
   }
 }
 
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function isProgrammerDefect(error: unknown): boolean {
   if (unavailableCauseKind(error)) return false;
   return error instanceof TypeError
@@ -443,15 +522,9 @@ function unavailableCauseKind(error: unknown): "permanent" | "transient" | undef
 }
 
 function displayProvider(provider: LocalAgentProvider): string {
-  switch (provider) {
-    case "codex": return "Codex";
-    case "claude": return "Claude";
-    case "opencode": return "OpenCode";
-    case "pi": return "Pi";
-    case "cursor": return "Cursor";
-    case "copilot": return "Copilot";
-    case "grok": return "Grok";
-  }
+  if (provider === "codex")
+    return "Codex";
+  return provider;
 }
 
 function targetErrorPayload(error: AgentTargetError): AgentErrorPayload {
@@ -497,12 +570,28 @@ function providerErrorPayload(error: AgentProviderError): AgentErrorPayload {
   };
 }
 
+function sandboxErrorPayload(error: AgentSandboxUnavailableError): AgentErrorPayload {
+  return {
+    code: error.code,
+    message: error.message,
+    retryable: error.retryable,
+    ...(error.backend ? { backend: error.backend } : {}),
+    ...(error.stage ? { stage: error.stage } : {}),
+    ...(error.detail ? { detail: error.detail } : {}),
+    ...(error.provider ? { provider: error.provider } : {}),
+    ...(error.operation ? { operation: error.operation } : {}),
+    ...(error.agentId ? { agentId: error.agentId } : {}),
+    fallback_available: error.fallback_available ?? error.fallbackAvailable ?? false,
+  };
+}
+
 function daemonErrorPayload(error: AgentDaemonError): AgentErrorPayload {
   return {
     code: error.code,
     message: error.message,
     retryable: error.retryable,
     operation: error.operation,
+    ...(error.activeTurns === undefined ? {} : { activeTurns: error.activeTurns }),
   };
 }
 
