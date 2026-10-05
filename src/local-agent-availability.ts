@@ -28,32 +28,6 @@ export function checkLocalAgentProviderAvailability(
   }
 }
 
-export function assertLocalAgentProviderAvailable(
-  provider: LocalAgentProvider,
-  env: NodeJS.ProcessEnv = process.env,
-): void {
-  const availability = checkLocalAgentProviderAvailability(provider, env);
-  if (availability.available) return;
-  throw new Error(
-    `${provider} provider is not available: ${availability.reason ?? "provider preflight failed"}`,
-  );
-}
-
-export function formatLocalAgentProviderAvailabilitySummary(
-  providers: LocalAgentProviderAvailability[],
-): string {
-  const available = providers
-    .filter((provider) => provider.available)
-    .map(formatAvailableProvider);
-  const unavailable = providers
-    .filter((provider) => !provider.available)
-    .map((provider) => `${provider.name} (${provider.reason ?? "unavailable"})`);
-  return [
-    available.length > 0 ? `available: ${available.join(", ")}` : undefined,
-    unavailable.length > 0 ? `unavailable: ${unavailable.join(", ")}` : undefined,
-  ].filter(Boolean).join("; ");
-}
-
 function codexAvailability(env: NodeJS.ProcessEnv): LocalAgentProviderAvailability {
   const availability = commandAvailability("codex", env.CODEX_COMMAND ?? "codex", env);
   return availability.available
@@ -94,10 +68,6 @@ function resolveCommand(command: string, env: NodeJS.ProcessEnv): string | undef
     }
   }
   return undefined;
-}
-
-function formatAvailableProvider(provider: LocalAgentProviderAvailability): string {
-  return provider.note ? `${provider.name} (${provider.note})` : provider.name;
 }
 
 function executableExists(command: string): boolean {

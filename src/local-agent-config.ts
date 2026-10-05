@@ -65,13 +65,6 @@ export function subagentProviderConfig(
   return config.providers.find((entry) => entry.id === provider);
 }
 
-export function isProviderFullAccess(
-  config: SubagentsConfig,
-  provider: LocalAgentProvider,
-): boolean {
-  return subagentProviderConfig(config, provider)?.sandboxMode === "full-access";
-}
-
 export function isSubagentProviderEnabled(
   config: SubagentsConfig,
   provider: LocalAgentProvider,
