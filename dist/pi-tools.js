@@ -1,11 +1,122 @@
-import { constants, createReadStream, linkSync, lstatSync, mkdirSync, statSync, unlinkSync } from "node:fs";
-import { dirname } from "node:path";
-import { access } from "node:fs/promises";
+import { constants, createReadStream, statSync } from "node:fs";
+import { access, open } from "node:fs/promises";
 import { finished } from "node:stream/promises";
 import { createEditTool, createFindTool, createGrepTool, createLsTool, createReadTool, createWriteTool, DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead, } from "@earendil-works/pi-coding-agent";
 import { resolveAllowedPath } from "./roots.js";
-// The dependency's signature-based image detector is not publicly exported.
-const { detectSupportedImageMimeTypeFromFile } = await import(new URL("./utils/mime.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
+// `@earendil-works/pi-coding-agent` does not publicly export its image
+// signature sniff (only "." and "./rpc-entry" are in its `exports` map), so
+// it is reimplemented here against the formats the upstream binary read
+// path (`createReadTool`, used below) supports: JPEG, PNG (rejecting
+// APNG), GIF, WEBP, and BMP. Detection reads only the leading bytes needed
+// for each signature, matching the upstream sniff window.
+const IMAGE_TYPE_SNIFF_BYTES = 4100;
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+function detectSupportedImageMimeType(buffer) {
+    if (startsWithBytes(buffer, [0xff, 0xd8, 0xff])) {
+        return buffer[3] === 0xf7 ? null : "image/jpeg";
+    }
+    if (startsWithBytes(buffer, PNG_SIGNATURE)) {
+        return isPng(buffer) && !isAnimatedPng(buffer) ? "image/png" : null;
+    }
+    if (startsWithAscii(buffer, 0, "GIF")) {
+        return "image/gif";
+    }
+    if (startsWithAscii(buffer, 0, "RIFF") && startsWithAscii(buffer, 8, "WEBP")) {
+        return "image/webp";
+    }
+    if (startsWithAscii(buffer, 0, "BM") && isBmp(buffer)) {
+        return "image/bmp";
+    }
+    return null;
+}
+async function detectSupportedImageMimeTypeFromFile(filePath) {
+    const fileHandle = await open(filePath, "r");
+    try {
+        const buffer = Buffer.alloc(IMAGE_TYPE_SNIFF_BYTES);
+        const { bytesRead } = await fileHandle.read(buffer, 0, IMAGE_TYPE_SNIFF_BYTES, 0);
+        return detectSupportedImageMimeType(buffer.subarray(0, bytesRead));
+    }
+    finally {
+        await fileHandle.close();
+    }
+}
+function isPng(buffer) {
+    return (buffer.length >= 16 && readUint32BE(buffer, PNG_SIGNATURE.length) === 13 && startsWithAscii(buffer, 12, "IHDR"));
+}
+function isAnimatedPng(buffer) {
+    let offset = PNG_SIGNATURE.length;
+    while (offset + 8 <= buffer.length) {
+        const chunkLength = readUint32BE(buffer, offset);
+        const chunkTypeOffset = offset + 4;
+        if (startsWithAscii(buffer, chunkTypeOffset, "acTL"))
+            return true;
+        if (startsWithAscii(buffer, chunkTypeOffset, "IDAT"))
+            return false;
+        const nextOffset = offset + 8 + chunkLength + 4;
+        if (nextOffset <= offset || nextOffset > buffer.length)
+            return false;
+        offset = nextOffset;
+    }
+    return false;
+}
+function isBmp(buffer) {
+    if (buffer.length < 26)
+        return false;
+    const declaredFileSize = readUint32LE(buffer, 2);
+    const pixelDataOffset = readUint32LE(buffer, 10);
+    const dibHeaderSize = readUint32LE(buffer, 14);
+    if (declaredFileSize !== 0 && declaredFileSize < 26)
+        return false;
+    if (pixelDataOffset < 14 + dibHeaderSize)
+        return false;
+    if (declaredFileSize !== 0 && pixelDataOffset >= declaredFileSize)
+        return false;
+    let colorPlanes;
+    let bitsPerPixel;
+    if (dibHeaderSize === 12) {
+        colorPlanes = readUint16LE(buffer, 22);
+        bitsPerPixel = readUint16LE(buffer, 24);
+    }
+    else if (dibHeaderSize >= 40 && dibHeaderSize <= 124) {
+        if (buffer.length < 30)
+            return false;
+        colorPlanes = readUint16LE(buffer, 26);
+        bitsPerPixel = readUint16LE(buffer, 28);
+    }
+    else {
+        return false;
+    }
+    return colorPlanes === 1 && [1, 4, 8, 16, 24, 32].includes(bitsPerPixel);
+}
+function readUint16LE(buffer, offset) {
+    return (buffer[offset] ?? 0) + ((buffer[offset + 1] ?? 0) << 8);
+}
+function readUint32BE(buffer, offset) {
+    return ((buffer[offset] ?? 0) * 0x1000000 +
+        ((buffer[offset + 1] ?? 0) << 16) +
+        ((buffer[offset + 2] ?? 0) << 8) +
+        (buffer[offset + 3] ?? 0));
+}
+function readUint32LE(buffer, offset) {
+    return ((buffer[offset] ?? 0) +
+        ((buffer[offset + 1] ?? 0) << 8) +
+        ((buffer[offset + 2] ?? 0) << 16) +
+        (buffer[offset + 3] ?? 0) * 0x1000000);
+}
+function startsWithBytes(buffer, bytes) {
+    if (buffer.length < bytes.length)
+        return false;
+    return bytes.every((byte, index) => buffer[index] === byte);
+}
+function startsWithAscii(buffer, offset, text) {
+    if (buffer.length < offset + text.length)
+        return false;
+    for (let index = 0; index < text.length; index++) {
+        if (buffer[offset + index] !== text.charCodeAt(index))
+            return false;
+    }
+    return true;
+}
 const MAX_READ_FILE_BYTES = 5 * 1024 * 1024;
 // Single source for bash timeout bounds (seconds): the MCP schema in server.js
 // imports these consts, so schema and executor cannot drift (rev 6 split-brain:
@@ -182,102 +293,6 @@ export async function editFileTool(input, context) {
         path,
         edits: input.edits,
     }, context);
-}
-function fileMutationError(message) {
-    return { content: [{ type: "text", text: message }], isError: true };
-}
-export async function deletePathsTool(input, context) {
-    let resolved;
-    try {
-        resolved = input.paths.map((path) => resolveAllowedPath(path, context.cwd, [context.root]));
-    }
-    catch (error) {
-        return fileMutationError(formatToolError(error)[0].text);
-    }
-    // Deduplicate and preflight everything before mutating anything: the tool
-    // validates all entries (exists, not a directory) before the first unlink.
-    const unique = [...new Map(resolved.map((path) => [path, path])).keys()];
-    const duplicates = resolved.length - unique.length;
-    const stats = new Map();
-    try {
-        for (const path of unique) {
-            const st = lstatSync(path);
-            if (st.isDirectory()) {
-                return fileMutationError(`${path} is a directory; delete only removes files and symlinks. Use the bash tool with rm -r for directories. (nothing deleted yet; ${unique.length} paths pending)`);
-            }
-            stats.set(path, st.size);
-        }
-    }
-    catch (error) {
-        return fileMutationError(`${formatToolError(error)[0].text} (nothing deleted yet; ${unique.length} paths pending)`);
-    }
-    const deleted = [];
-    const failed = [];
-    let lastError = null;
-    for (const path of unique) {
-        try {
-            unlinkSync(path);
-            deleted.push(`${path} (${stats.get(path)} bytes)`);
-        }
-        catch (error) {
-            failed.push(path);
-            lastError = error;
-        }
-    }
-    if (failed.length > 0) {
-        const suffix = deleted.length > 0 ? ` (deleted ${deleted.length}: ${deleted.join(", ")})` : "";
-        return fileMutationError(`${formatToolError(lastError)[0].text} (failed: ${failed.join(", ")})${suffix}`);
-    }
-    const duplicateNote = duplicates > 0 ? ` (${duplicates} duplicate path${duplicates === 1 ? "" : "s"} ignored)` : "";
-    return { content: [{ type: "text", text: `Deleted ${deleted.length} file${deleted.length === 1 ? "" : "s"}: ${deleted.join(", ")}${duplicateNote}` }] };
-}
-export async function movePathTool(input, context) {
-    let from;
-    let to;
-    try {
-        from = resolveAllowedPath(input.from, context.cwd, [context.root]);
-        to = resolveAllowedPath(input.to, context.cwd, [context.root]);
-    }
-    catch (error) {
-        return fileMutationError(formatToolError(error)[0].text);
-    }
-    try {
-        const st = lstatSync(from);
-        if (st.isDirectory()) {
-            return fileMutationError(`${from} is a directory; move only renames files and symlinks. Use the bash tool with mv for directories.`);
-        }
-        const existing = lstatSync(to, { throwIfNoEntry: false });
-        if (existing) {
-            return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
-        }
-        // Create the destination's parent directory tree (already confined to
-        // the validated workspace path by resolveAllowedPath above), mirroring
-        // the write tool's recursive mkdir so a move into a new module
-        // directory does not fail with a misleading ENOENT naming the source.
-        mkdirSync(dirname(to), { recursive: true });
-        // Atomic no-replace: link(2) fails with EEXIST if `to` appears between
-        // the check and the mutation, which rename(2) would silently replace.
-        // On Linux link(2) does not dereference symlinks, so a moved symlink
-        // stays a symlink. Crash between link and unlink leaves both names
-        // pointing at the same inode (recoverable, no data loss).
-        try {
-            linkSync(from, to);
-        }
-        catch (error) {
-            if (error.code === "EEXIST") {
-                return fileMutationError(`${to} already exists; move never overwrites. Delete the destination first if that is intended.`);
-            }
-            if (error.code === "EXDEV") {
-                return fileMutationError(`${from} and ${to} are on different filesystems; move only links within one filesystem. Use the bash tool with mv.`);
-            }
-            throw error;
-        }
-        unlinkSync(from);
-        return { content: [{ type: "text", text: `Moved ${from} (${st.size} bytes) to ${to}` }] };
-    }
-    catch (error) {
-        return fileMutationError(formatToolError(error)[0].text);
-    }
 }
 export async function grepFilesTool(input, context) {
     const path = input.path === undefined
