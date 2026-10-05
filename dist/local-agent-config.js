@@ -44,9 +44,6 @@ export function resolveSubagentsConfig(value, env = process.env) {
 export function subagentProviderConfig(config, provider) {
     return config.providers.find((entry) => entry.id === provider);
 }
-export function isProviderFullAccess(config, provider) {
-    return subagentProviderConfig(config, provider)?.sandboxMode === "full-access";
-}
 export function isSubagentProviderEnabled(config, provider) {
     return config.enabled && subagentProviderConfig(config, provider)?.enabled === true;
 }
