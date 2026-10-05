@@ -19,6 +19,10 @@ export async function git(cwd, args, options = {}) {
             env: {
                 ...(options.env ? { ...process.env, ...options.env } : process.env),
                 GIT_TERMINAL_PROMPT: "0",
+                // Force the "C" locale so git's stderr wording (matched below
+                // against NOT_A_GIT_REPOSITORY_MESSAGE) is stable regardless
+                // of the host's configured locale.
+                LC_ALL: "C",
             },
             maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
             timeout: timeoutMs,

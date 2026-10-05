@@ -118,7 +118,9 @@ async function git(args, cwd) {
     try {
         const { stdout } = await execFileAsync("git", args, {
             cwd,
-            env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+            // LC_ALL: "C" keeps git's stderr wording locale-independent,
+            // matching dist/git.js (its isNotAGitRepositoryError check).
+            env: { ...process.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
             maxBuffer: 10 * 1024 * 1024,
             timeout: timeoutMs,
             killSignal: "SIGTERM",
