@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { git, getGitEligibility } from "./git.js";
+import { git, isInsideGitWorkTree } from "./git.js";
 import { AccessDeniedError, assertAllowedPath, expandHomePath, isPathInsideRoot, resolveAllowedPath, } from "./roots.js";
 import { loadWorkspaceSkills, markSkillActivated, resolveSkillReadPath, } from "./skills.js";
 import { loadLocalAgentProfiles, } from "./local-agent-profiles.js";
@@ -309,12 +309,16 @@ export class WorkspaceRegistry {
             if (loadedPaths.has(path))
                 return;
             const realPath = await tryRealpath(path);
-            if (realPath && loadedRealPaths.has(realPath))
+            if (!realPath)
+                return;
+            if (loadedRealPaths.has(realPath))
+                return;
+            if (!(await isRegularFile(realPath)))
                 return;
             discovered.push({ path });
         };
-        const eligibility = await getGitEligibility(root);
-        if (eligibility.gitRoot) {
+        const insideGitWorkTree = await isInsideGitWorkTree(root);
+        if (insideGitWorkTree) {
             // Inside a git work tree: ask git, which already knows .gitignore
             // and treats nested repos/worktrees as opaque (never recursed
             // into for untracked files). No walk, no fallback on git errors.
@@ -414,6 +418,14 @@ async function tryRealpath(path) {
         return undefined;
     }
 }
+async function isRegularFile(path) {
+    try {
+        return (await stat(path)).isFile();
+    }
+    catch {
+        return false;
+    }
+}
 async function listGitContextFiles(root) {
     const patterns = [...CONTEXT_FILE_NAMES].map((name) => `:(glob)**/${name}`);
     const { stdout } = await git(root, ["ls-files", "-co", "--exclude-standard", "-z", "--", ...patterns]);
@@ -430,8 +442,10 @@ async function walkWorkspace(directory, visit) {
     for await (const entry of entries) {
         const path = join(directory, entry.name);
         if (entry.isDirectory()) {
-            if (SKIPPED_CONTEXT_DIRS.has(entry.name)) continue;
-            if (await isNestedRepoRoot(path)) continue;
+            if (SKIPPED_CONTEXT_DIRS.has(entry.name))
+                continue;
+            if (await isNestedRepoRoot(path))
+                continue;
             await walkWorkspace(path, visit);
             continue;
         }
@@ -446,7 +460,10 @@ async function isNestedRepoRoot(directory) {
         await stat(join(directory, ".git"));
         return true;
     }
-    catch {
+    catch (error) {
+        if (!isErrnoException(error) || error.code !== "ENOENT") {
+            throw error;
+        }
         return false;
     }
 }
