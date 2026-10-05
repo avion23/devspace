@@ -16,8 +16,7 @@ export interface GitEligibility {
   message?: string;
 }
 
-// Default budget mirrors the 10s execFile timeout already used for repo_status
-// in server.js. Subcommands that routinely do more work (diffing or staging a
+// Default budget: 10s per git call. Subcommands that routinely do more work (diffing or staging a
 // large working tree) get a larger, still-bounded budget; every call must
 // finish well inside the ~30s tool-call yield window.
 const DEFAULT_GIT_TIMEOUT_MS = 10_000;
@@ -38,6 +37,10 @@ export async function git(
       env: {
         ...(options.env ? { ...process.env, ...options.env } : process.env),
         GIT_TERMINAL_PROMPT: "0",
+        // Force the "C" locale so git's stderr wording (matched below
+        // against NOT_A_GIT_REPOSITORY_MESSAGE) is stable regardless
+        // of the host's configured locale.
+        LC_ALL: "C",
       },
       maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
       timeout: timeoutMs,
