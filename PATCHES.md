@@ -21,21 +21,16 @@ not a backup file on disk.
 - `read` rejects files over 5 MiB only for the whole-file image path; text
   reads stream the requested `offset`/`limit` range or output cap instead of
   rejecting every large file.
+- The image/text split reimplements the dependency's signature sniff (magic
+  bytes for JPEG, PNG/APNG, GIF, WEBP, BMP) locally in `dist/pi-tools.js`
+  instead of importing its non-exported `utils/mime.js` internal (the
+  package's `exports` map only publishes `.` and `./rpc-entry`); a dependency
+  bump that moves that internal path no longer breaks server start.
 
 ## File tools (`dist/pi-tools.js`, registered from `dist/server.js`)
 
-- `delete` (`deletePathsTool`): validates every path against the workspace
-  root, refuses directories (points the caller at `bash rm -r`), refuses
-  symlink targets it shouldn't follow, and reports exactly which paths were
-  removed vs failed.
-- `move` (`movePathTool`): root-validates `from`/`to`, refuses directories and
-  any existing destination (including dangling symlinks), and is atomic via
-  `link(2)` + `unlink` (no lstat-then-rename race). Creates the destination's
-  parent directories recursively (like `write`) before linking, so a move
-  into a new module directory does not fail with a misleading ENOENT naming
-  the source. A cross-filesystem move (`EXDEV`) is refused with a pointer to
-  `bash mv`; `rename(2)` cannot cross filesystems either, so there is no
-  fallback.
+- `delete` and `move` (`deletePathsTool`, `movePathTool`) have been removed
+  from `dist/pi-tools.js`; use the `bash` tool (`rm`, `mv`) instead.
 - `repo_status` (`dist/server.js`): one read-only call returning `{branch,
   detached, head, upstream, ahead, behind, dirtyCount, dirtyPaths, branchLine,
   worktrees}` via `git -C <root>`, replacing repeated shell `git`
@@ -73,6 +68,10 @@ not a backup file on disk.
   `diff` 20 s, `worktree add` 15 s), `SIGTERM` on expiry and
   `GIT_TERMINAL_PROMPT=0`. A timeout fails with
   `git <args> timed out after <ms>ms`.
+- Every git call also runs with `LC_ALL=C`, so `isNotAGitRepositoryError`'s
+  match against git's English `"fatal: not a git repository"` wording stays
+  correct regardless of the host's configured locale (e.g.
+  `LC_ALL=de_DE.UTF-8`).
 
 ## Process output (`dist/process-sessions.js`)
 
@@ -110,6 +109,19 @@ profile schema reject any other value.
 - One Codex app-server runs per `(executable, CODEX_HOME)` and is shared
   across agents (`CodexLocalAgentDriver.runtimeKey` ignores agent identity).
 
+## Defaults and CLI additions (`dist/config.js`, `dist/onboarding.js`, `dist/cli.js`)
+
+- `DEVSPACE_WIDGETS` (and the matching `config.json` field) default to `off`;
+  pristine upstream defaults to `full`. ChatGPT Apps iframe widgets are
+  opt-in on this fork.
+- Onboarding (`updateOnboardingSubagentsConfig`) defaults a fresh
+  `subagents.sandboxFallback` to `"fail"`, matching the config schema's own
+  default (`resolveSubagentsConfig`); pristine upstream has no
+  `sandboxFallback` concept.
+- `devspace agents daemon stop` takes an additional `--force` flag (not in
+  pristine). Without it, the daemon refuses to stop while any turn is active;
+  `--force` bypasses that guard.
+
 ## Nested instruction file discovery (`dist/workspaces.js`)
 
 `findAvailableAgentsFiles` finds `AGENTS.md`/`CLAUDE.md` (and upper-case
@@ -130,11 +142,16 @@ instructions".
   walk runs in this case.
 - Outside a git work tree, a directory walk (`walkWorkspace`) still runs,
   but now also skips any subdirectory that is itself a repository or
-  worktree root (contains a `.git` entry; only ENOENT means absent), on top of the existing
-  `SKIPPED_CONTEXT_DIRS` name-based skips. A non-git root with large
+  worktree root (contains a `.git` entry; ENOENT means absent), on top of the
+  existing `SKIPPED_CONTEXT_DIRS` name-based skips. A non-git root with large
   ignored trees (`node_modules`, build output, etc.) outside those skipped
   names is still walked in full; this is a partial mitigation, not a fix,
   for that case.
+- Both the `.git` stat probe and the directory read (`opendir`) in that walk
+  skip an entry they have no permission to inspect (`EACCES`/`EPERM`) instead
+  of throwing, so a root like `/tmp` that contains directories owned by other
+  users (e.g. `systemd-private-*`) does not abort discovery; any other error
+  still propagates.
 
 ## Releases (`scripts/`)
 
