@@ -116,12 +116,15 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private readonly codes = new Map<string, AuthorizationCodeRecord>();
   private readonly oauthStore: SqliteOAuthStore;
   private readonly resourceServerUrl: URL;
+  private readonly issuerUrl: URL;
 
   constructor(
     private readonly config: OAuthConfig,
     resourceServerUrl: URL,
     stateDir: string,
+    issuerUrl: URL,
   ) {
+    this.issuerUrl = issuerUrl;
     this.resourceServerUrl = resourceUrlFromServerUrl(resourceServerUrl);
     this.oauthStore = new SqliteOAuthStore(stateDir);
     this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
@@ -177,6 +180,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     const redirectUrl = new URL(params.redirectUri);
     redirectUrl.searchParams.set("code", code);
     if (params.state !== undefined) redirectUrl.searchParams.set("state", params.state);
+    redirectUrl.searchParams.set("iss", this.issuerUrl.href);
     res.redirect(302, redirectUrl.href);
   }
 
