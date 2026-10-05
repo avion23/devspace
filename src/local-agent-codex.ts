@@ -88,7 +88,7 @@ const MAX_SANDBOX_PROBE_STDERR_BYTES = 8 * 1024;
 
 type LinuxSandboxProbeOutcome = "ok" | "denied" | "indeterminate";
 
-interface LinuxSandboxProbeResult {
+export interface LinuxSandboxProbeResult {
   outcome: LinuxSandboxProbeOutcome;
   reason?: string;
   code?: number | string;
