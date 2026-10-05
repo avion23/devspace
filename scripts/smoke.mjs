@@ -83,10 +83,9 @@ async function authorize(server) {
 
 const text = (result) => result.content.map((item) => item.text ?? "").join("");
 
-function checkNotDuplicated(result, label) {
+function checkResultText(result, label) {
     const body = text(result);
-    const structured = JSON.stringify(result.structuredContent ?? {});
-    ok(body.length < 40 || !structured.includes(body.slice(0, 40)), `${label}: output not duplicated in structuredContent (${structured.length}B structured, ${body.length}B text)`);
+    ok(body.length > 0 && result.structuredContent?.result === body, `${label}: structuredContent.result carries the text (${body.length}B)`);
 }
 
 async function checkTools(server, repo) {
@@ -107,16 +106,15 @@ async function checkTools(server, repo) {
         const opened = await first.callTool({ name: "open_workspace", arguments: { path: repo } });
         const workspaceId = opened.structuredContent?.workspaceId;
         ok(Boolean(workspaceId), `open_workspace returns ${workspaceId}`);
-        checkNotDuplicated(opened, "open_workspace");
         const written = await second.callTool({ name: "write", arguments: { workspaceId, path: "a.txt", content: "hello\n".repeat(50) } });
         ok(!written.isError, "second client uses the workspace (stateless transport)");
-        checkNotDuplicated(await first.callTool({ name: "read", arguments: { workspaceId, path: "a.txt" } }), "read");
+        checkResultText(await first.callTool({ name: "read", arguments: { workspaceId, path: "a.txt" } }), "read");
 
         const started = Date.now();
         const long = await first.callTool({ name: "exec_command", arguments: { workspaceId, cmd: "echo start; sleep 40; echo done" } }, undefined, { timeout: 120_000 });
         const seconds = (Date.now() - started) / 1000;
         ok(seconds <= 31 && long.structuredContent?.running === true, `exec_command yields in ${seconds.toFixed(1)}s with running=true`);
-        checkNotDuplicated(long, "exec_command");
+        checkResultText(long, "exec_command");
         let final;
         for (let polls = 1; ; polls++) {
             const poll = await first.callTool({ name: "write_stdin", arguments: { workspaceId, sessionId: long.structuredContent.sessionId } }, undefined, { timeout: 120_000 });
@@ -124,6 +122,7 @@ async function checkTools(server, repo) {
                 continue;
             final = poll;
             ok(text(final).includes("done") && final.structuredContent.exitCode === 0, `write_stdin polls to exit 0 (${polls} polls)`);
+            checkResultText(final, "write_stdin");
             break;
         }
 
