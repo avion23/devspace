@@ -1,13 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { access, realpath } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { createOAuthMetadata, mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import {
   registerAppResource,
@@ -15,7 +14,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import express from "express";
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import * as z from "zod/v4";
 import { applyPatch } from "./apply-patch.js";
 import {
@@ -32,26 +31,22 @@ import {
   requestIp,
   requestPath,
   commandPreview,
-  sessionIdPrefix,
 } from "./logger.js";
 import {
+  BASH_TOOL_DEFAULT_TIMEOUT_SECONDS,
+  BASH_TOOL_MAX_TIMEOUT_SECONDS,
   editFileTool,
   findFilesTool,
   grepFilesTool,
   listDirectoryTool,
   readFileTool,
-  runShellTool,
   writeFileTool,
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
-import {
-  McpSessionRegistry,
-  type McpSessionCloseResult,
-} from "./mcp-sessions.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
+import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
-import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
@@ -61,15 +56,9 @@ import {
 import {
   buildLocalAgentCatalog,
   buildLocalAgentProviderStatuses,
-  formatLocalAgentProviderStatusSummary,
   type LocalAgentProviderStatus,
 } from "./local-agent-catalog.js";
 
-type Transport = StreamableHTTPServerTransport;
-// MCP clients can reconnect without closing the previous transport. Bound stale
-// session retention so abandoned MCP servers do not accumulate for the life of the process.
-const MCP_SESSION_IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
-const MCP_SESSION_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
 const WRITE_TOOL_ANNOTATIONS = {
@@ -189,8 +178,18 @@ interface ToolLogFields {
   command?: string;
   commandLength?: number;
   success: boolean;
+  running?: boolean;
+  exitCode?: number;
+  timedOut?: boolean;
   durationMs: number;
   error?: string;
+}
+
+function executionInstructions(config: ServerConfig): string {
+  const writes = config.toolMode === "codex"
+    ? "Use apply_patch for project file modifications."
+    : "Use edit for targeted modifications, write for new files or complete rewrites.";
+  return `${writes} Use ${config.toolMode === "codex" ? "exec_command" : "bash or exec_command"} to execute inspection, tests, builds, and other shell work. ${config.toolMode === "codex" ? "exec_command" : "Bash and exec_command"} calls yield within 10 seconds by default (exec_command can wait up to 30 seconds via yieldTimeMs); write_stdin yields within 5 seconds when polling, or 250 ms when sending input, also configurable up to 30 seconds. This does not kill valid long work. If running=true, keep the sessionId and use write_stdin with the same workspaceId to retrieve subsequent output and the final exit status; do not rerun the command. To cancel, send chars="\\u0003" with write_stdin.${config.toolMode === "codex" ? "" : " Bash timeout is the actual execution deadline across all polls, not an HTTP wait time."}`;
 }
 
 function serverInstructions(config: ServerConfig): string {
@@ -203,7 +202,7 @@ function serverInstructions(config: ServerConfig): string {
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. ${executionInstructions(config)} Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -216,7 +215,7 @@ function serverInstructions(config: ServerConfig): string {
 
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+  return `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected. ${agentsMd}${skills}${inspection}${executionInstructions(config)} Prefer ${toolNames.edit} for targeted modifications and ${toolNames.write} only for new files or complete rewrites; use ${toolNames.shell} for tests, builds, git inspection, git state changes (add, commit, merge, rebase, push), package scripts, and commands that are better executed by the shell. Do not create or modify project file content with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files. Generated build artifacts (target/, caches, coverage, reports) written by test and build commands are expected.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -511,10 +510,12 @@ async function assertWorkspaceAppAssets(): Promise<void> {
 
 function processResult(snapshot: ProcessSnapshot): string {
   const status = snapshot.running
-    ? `Process running with session ID ${snapshot.sessionId}.`
-    : snapshot.signal
-      ? `Process exited after signal ${snapshot.signal}.`
-      : `Process exited with code ${snapshot.exitCode ?? "unknown"}.`;
+    ? `Process running with session ID ${snapshot.sessionId}. Poll with write_stdin using this workspaceId and sessionId; do not rerun the command. Send chars="\\u0003" to cancel.`
+    : snapshot.timedOut
+      ? `Command timed out after ${snapshot.timeoutSeconds} seconds; owned process group cleanup completed. Intentionally detached groups are outside cancellation scope.`
+      : snapshot.signal
+        ? `Process exited after signal ${snapshot.signal}.`
+        : `Process exited with code ${snapshot.exitCode ?? "unknown"}.`;
   return snapshot.output ? `${snapshot.output.replace(/\n$/, "")}\n${status}` : status;
 }
 
@@ -524,13 +525,15 @@ function processOutputSchema(): z.ZodRawShape {
     running: z.boolean(),
     exitCode: z.number().int().optional(),
     signal: z.string().optional(),
+    timedOut: z.boolean(),
+    timeoutSeconds: z.number().positive().optional(),
     wallTimeMs: z.number().nonnegative(),
     outputTruncated: z.boolean(),
   });
 }
 
 function processToolResponse(
-  tool: "exec_command" | "write_stdin",
+  tool: "exec_command" | "write_stdin" | "bash",
   workspaceId: string,
   snapshot: ProcessSnapshot,
   summary: Record<string, unknown>,
@@ -540,6 +543,7 @@ function processToolResponse(
   const outputSummary = textSummary(snapshot.output ? [textBlock(snapshot.output)] : []);
   return {
     content,
+    isError: !snapshot.running && (snapshot.timedOut || Boolean(snapshot.signal) || snapshot.exitCode !== 0),
     _meta: {
       tool,
       card: {
@@ -554,13 +558,15 @@ function processToolResponse(
       running: snapshot.running,
       exitCode: snapshot.exitCode,
       signal: snapshot.signal,
+      timedOut: snapshot.timedOut,
+      timeoutSeconds: snapshot.timeoutSeconds,
       wallTimeMs: snapshot.wallTimeMs,
       outputTruncated: snapshot.outputTruncated,
     },
   };
 }
 
-function registerCodexProcessTools(
+function registerProcessTools(
   server: McpServer,
   config: ServerConfig,
   workspaces: WorkspaceRegistry,
@@ -572,7 +578,7 @@ function registerCodexProcessTools(
     {
       title: "Execute command",
       description:
-        "Run a command in a workspace. Returns its result when it exits during the yield window, otherwise returns a sessionId for write_stdin. Use this for file inspection, tests, builds, package scripts, and long-running processes.",
+        `Run a command in a workspace. Returns within 10 seconds by default (configurable up to 30 seconds via yieldTimeMs) with the exit result or a running sessionId for write_stdin. Use for inspection, tests, builds, package scripts, and long-running processes. ${config.toolMode === "codex" ? "Use apply_patch for project file modifications." : "Use edit/write for project file modifications, not shell commands."}`,
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -599,7 +605,7 @@ function registerCodexProcessTools(
           .positive()
           .max(100_000)
           .optional()
-          .describe("Approximate output token budget. Defaults to 10000."),
+          .describe("Approximate output token budget. Defaults to 3000."),
       },
       outputSchema: processOutputSchema(),
       ...toolWidgetDescriptorMeta(config, "shell"),
@@ -627,7 +633,10 @@ function registerCodexProcessTools(
         workingDirectory: workingDirectory ?? ".",
         command: cmd,
         commandLength: cmd.length,
-        success: true,
+        success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+        running: snapshot.running,
+        exitCode: snapshot.exitCode,
+        timedOut: snapshot.timedOut,
         durationMs: Math.round(performance.now() - startedAt),
       });
 
@@ -647,10 +656,10 @@ function registerCodexProcessTools(
     {
       title: "Write to process",
       description:
-        "Poll or write characters to a process returned by exec_command. Omit chars or pass an empty string to poll. Pass \\u0003 to send Ctrl-C.",
+        "Poll or write characters to a process returned by bash or exec_command. Polls return within 5 seconds and writes/resizes within 250 ms by default (configurable up to 30 seconds via yieldTimeMs); keep polling while running is true to retrieve final output and exit status. Omit chars or pass an empty string to poll. Pass \\u0003 to cancel the owned process group with Ctrl-C (forced termination after a short grace period). Intentionally detached groups are outside cancellation scope.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
-        sessionId: z.number().describe("Process session identifier returned by exec_command."),
+        sessionId: z.number().int().positive().describe("Process session identifier returned by bash or exec_command."),
         chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll."),
         columns: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this width."),
         rows: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this height."),
@@ -660,14 +669,14 @@ function registerCodexProcessTools(
           .min(0)
           .max(30_000)
           .optional()
-          .describe("Milliseconds to wait for process output or completion. Defaults to 10000."),
+          .describe("Milliseconds to wait for completion (at most 30000). Polls default to 5000, writes/resizes to 250; buffered output returns immediately."),
         maxOutputTokens: z
           .number()
           .int()
           .positive()
           .max(100_000)
           .optional()
-          .describe("Approximate output token budget. Defaults to 10000."),
+          .describe("Approximate output token budget. Defaults to 3000."),
       },
       outputSchema: processOutputSchema(),
       ...toolWidgetDescriptorMeta(config, "shell"),
@@ -689,7 +698,10 @@ function registerCodexProcessTools(
       logToolCall(config, {
         tool: "write_stdin",
         workspaceId,
-        success: true,
+        success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+        running: snapshot.running,
+        exitCode: snapshot.exitCode,
+        timedOut: snapshot.timedOut,
         durationMs: Math.round(performance.now() - startedAt),
       });
 
@@ -801,7 +813,6 @@ export function createMcpServer(
         agentProviders: z.array(workspaceLocalAgentProviderOutputSchema).optional(),
         agents: z.array(workspaceLocalAgentOutputSchema).optional(),
         skillDiagnostics: z.array(z.unknown()).optional(),
-        instruction: z.string(),
       },
       ...toolWidgetDescriptorMeta(config, "workspace"),
       annotations: { readOnlyHint: true },
@@ -857,10 +868,10 @@ export function createMcpServer(
       const visibleAgents = includeBootstrapContext ? cardAgents : [];
       const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
       const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
-      const cardInstruction = config.skillsEnabled
+      const cardInstruction = (config.skillsEnabled
         ? "Use this workspaceId for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
-        : "Use this workspaceId for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
-      const instruction = workspaceReused
+        : "Use this workspaceId for subsequent work in this project. Keep reusing it while working in this project. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.") + ` ${executionInstructions(config)}`;
+      const instruction = (workspaceReused
         ? [
             `Workspace already open as ${workspace.id}.`,
             "Continue with this workspaceId.",
@@ -868,7 +879,7 @@ export function createMcpServer(
           ].join("\n\n")
         : workspace.mode === "worktree"
           ? "Use this workspaceId for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
-          : cardInstruction;
+          : cardInstruction) + (workspaceReused || workspace.mode === "worktree" ? ` ${executionInstructions(config)}` : "");
       const resultContent: ToolContent[] = [
         {
           type: "text" as const,
@@ -952,7 +963,6 @@ export function createMcpServer(
                 skillDiagnostics: workspace.skillDiagnostics,
               }
             : {}),
-          instruction,
         },
       };
     },
@@ -965,7 +975,7 @@ export function createMcpServer(
       title: "Read file",
       description:
         [
-          "Read a file in a workspace. Use this for file inspection instead of shell commands like cat or sed.",
+          "Read a file in a workspace, or the exact ~/.claude/CLAUDE.md file (read-only, no symlink redirection). Use this for file inspection instead of shell commands like cat or sed.",
           "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
           config.skillsEnabled
             ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; only advertised SKILL.md files and files under already-loaded skill directories are readable."
@@ -981,8 +991,8 @@ export function createMcpServer(
           .string()
           .describe(
             config.skillsEnabled
-              ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
-              : "File path to read, relative to the workspace root.",
+              ? "Workspace-relative, absolute, or ~/ file path. Outside the workspace, only ~/.claude/CLAUDE.md, advertised SKILL.md files, and files under already-loaded skill directories are readable."
+              : "Workspace-relative, absolute, or ~/ file path. Outside the workspace, only the exact ~/.claude/CLAUDE.md file is readable.",
           ),
         offset: z
           .number()
@@ -1072,7 +1082,12 @@ export function createMcpServer(
           .describe("File path to write, relative to the workspace root."),
         content: z.string().describe("Complete new file content."),
       },
-      outputSchema: resultOutputSchema(),
+      outputSchema: resultOutputSchema({
+        additions: z.number(),
+        removals: z.number(),
+        lines: z.number(),
+        characters: z.number(),
+      }),
       ...toolWidgetDescriptorMeta(config, "write"),
       annotations: WRITE_TOOL_ANNOTATIONS,
     },
@@ -1125,6 +1140,7 @@ export function createMcpServer(
         },
         structuredContent: {
           result: contentText(response.content),
+          ...summary,
         },
       };
     },
@@ -1159,6 +1175,9 @@ export function createMcpServer(
       },
       outputSchema: resultOutputSchema({
         status: z.literal("applied"),
+        additions: z.number(),
+        removals: z.number(),
+        editCount: z.number(),
       }),
       ...toolWidgetDescriptorMeta(config, "edit"),
       annotations: EDIT_TOOL_ANNOTATIONS,
@@ -1213,8 +1232,11 @@ export function createMcpServer(
           },
         },
         structuredContent: {
-          status: "applied",
+          status: "applied" as const,
           result: contentText(editContent),
+          additions: stats.additions,
+          removals: stats.removals,
+          editCount: input.edits.length,
         },
       };
     },
@@ -1309,7 +1331,10 @@ export function createMcpServer(
             .string()
             .describe(workspaceIdDescription),
         },
-        outputSchema: resultOutputSchema(),
+        outputSchema: resultOutputSchema({
+          summary: reviewSummaryOutputSchema,
+          files: z.array(reviewFileOutputSchema),
+        }),
         ...toolWidgetDescriptorMeta(config, "show_changes"),
         annotations: { readOnlyHint: true },
       },
@@ -1345,6 +1370,8 @@ export function createMcpServer(
           },
           structuredContent: {
             result: contentText(content),
+            summary: review.summary,
+            files: review.files,
           },
         };
       },
@@ -1372,7 +1399,12 @@ export function createMcpServer(
             ),
           include: z.string().optional().describe("Optional include glob."),
         },
-        outputSchema: resultOutputSchema(),
+        outputSchema: resultOutputSchema({
+          pattern: z.string(),
+          scope: z.string(),
+          lines: z.number(),
+          characters: z.number(),
+        }),
         ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
@@ -1420,6 +1452,7 @@ export function createMcpServer(
           },
           structuredContent: {
             result: contentText(response.content),
+            ...summary,
           },
         };
       },
@@ -1442,7 +1475,12 @@ export function createMcpServer(
             .optional()
             .describe("Optional path scope relative to the workspace root."),
         },
-        outputSchema: resultOutputSchema(),
+        outputSchema: resultOutputSchema({
+          pattern: z.string(),
+          scope: z.string(),
+          lines: z.number(),
+          characters: z.number(),
+        }),
         ...toolWidgetDescriptorMeta(config, "search"),
         annotations: { readOnlyHint: true },
       },
@@ -1490,6 +1528,7 @@ export function createMcpServer(
           },
           structuredContent: {
             result: contentText(response.content),
+            ...summary,
           },
         };
       },
@@ -1512,7 +1551,10 @@ export function createMcpServer(
               "Directory path to list, relative to the workspace root.",
             ),
         },
-        outputSchema: resultOutputSchema(),
+        outputSchema: resultOutputSchema({
+          lines: z.number(),
+          characters: z.number(),
+        }),
         ...toolWidgetDescriptorMeta(config, "directory"),
         annotations: { readOnlyHint: true },
       },
@@ -1556,6 +1598,7 @@ export function createMcpServer(
           },
           structuredContent: {
             result: contentText(response.content),
+            ...summary,
           },
         };
       },
@@ -1568,9 +1611,9 @@ export function createMcpServer(
     toolNames.shell,
     {
       title: "Bash",
-      description: config.toolMode !== "full"
+      description: "Returns within 10 seconds with output and exit status, or running=true and sessionId for write_stdin polling/cancellation. The execution timeout does not limit the HTTP yield window. " + (config.toolMode !== "full"
         ? `Run a shell command in a workspace. Use only for tests, builds, git inspection, package scripts, search, file discovery, and directory inspection. In minimal tool mode, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} are disabled; use command-line tools such as grep, rg, find, ls, and tree for those read-only inspection actions. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read} for direct file reads. This is powerful execution and should only be exposed behind strong authentication.`
-        : `Run a shell command in a workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. This is powerful execution and should only be exposed behind strong authentication.`,
+        : `Run a shell command in a workspace. Use only for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not use ${toolNames.shell} to create or modify files. Do not use shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or generated scripts to write project files; use ${toolNames.edit} for targeted changes and ${toolNames.write} for new files or full rewrites. Prefer ${toolNames.read}, ${toolNames.grep}, ${toolNames.glob}, and ${toolNames.ls} for file inspection. This is powerful execution and should only be exposed behind strong authentication.`),
       inputSchema: {
         workspaceId: z
           .string()
@@ -1589,11 +1632,11 @@ export function createMcpServer(
         timeout: z
           .number()
           .positive()
-          .max(300)
+          .max(BASH_TOOL_MAX_TIMEOUT_SECONDS)
           .optional()
-          .describe("Timeout in seconds. Defaults to 30, max 300."),
+          .describe(`Actual execution deadline in seconds, preserved across polls. Defaults to ${BASH_TOOL_DEFAULT_TIMEOUT_SECONDS}, max ${BASH_TOOL_MAX_TIMEOUT_SECONDS}.`),
       },
-      outputSchema: resultOutputSchema(),
+      outputSchema: processOutputSchema(),
       ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
@@ -1604,59 +1647,40 @@ export function createMcpServer(
         workspace,
         workingDirectory,
       );
-      const response = await runShellTool(input, {
+      const snapshot = await processSessions.start({
+        workspaceId,
+        command: input.command,
         cwd,
-        root: workspace.root,
+        workspaceRoot: workspace.root,
+        timeoutSeconds: input.timeout ?? BASH_TOOL_DEFAULT_TIMEOUT_SECONDS,
+        shellConfig: getShellConfig(),
       });
 
-      if (response.isError) {
-        logFailedToolResponse(config, {
-          tool: toolNames.shell,
-          workspaceId,
-          workingDirectory: workingDirectory ?? ".",
-          command: input.command,
-          commandLength: input.command.length,
-        }, response.content, startedAt);
-        return response;
-      }
-
-      const summary = {
-        command: input.command,
-        workingDirectory: workingDirectory ?? ".",
-        ...textSummary(response.content),
-      };
       logToolCall(config, {
         tool: toolNames.shell,
         workspaceId,
         workingDirectory: workingDirectory ?? ".",
         command: input.command,
         commandLength: input.command.length,
-        success: true,
+        success: snapshot.running || (!snapshot.timedOut && !snapshot.signal && snapshot.exitCode === 0),
+        running: snapshot.running,
+        exitCode: snapshot.exitCode,
+        timedOut: snapshot.timedOut,
         durationMs: Math.round(performance.now() - startedAt),
       });
 
-      return {
-        ...response,
-        _meta: {
-          tool: toolNames.shell,
-          card: {
-            workspaceId,
-            path: workingDirectory,
-            summary,
-            payload: { content: response.content },
-          },
-        },
-        structuredContent: {
-          result: contentText(response.content),
-        },
-      };
+      return processToolResponse(toolNames.shell, workspaceId, snapshot, {
+        command: input.command,
+        workingDirectory: workingDirectory ?? ".",
+        running: snapshot.running,
+        exitCode: snapshot.exitCode,
+        wallTimeMs: snapshot.wallTimeMs,
+      });
     },
   );
   }
 
-  if (config.toolMode === "codex") {
-    registerCodexProcessTools(server, config, workspaces, processSessions);
-  }
+  registerProcessTools(server, config, workspaces, processSessions);
 
   if (config.artifactsEnabled && isArtifactDownloadSupportedPlatform()) {
     registerArtifactTools(server, {
@@ -1686,10 +1710,17 @@ export function createServer(
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
   });
-  const transports = new McpSessionRegistry<Transport>();
-  const mcpUrl = new URL("/mcp", config.publicBaseUrl);
+  const issuerUrl = new URL(config.publicBaseUrl);
+  const mcpUrl = new URL("/mcp", issuerUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir, issuerUrl);
+  const oauthMetadata = createOAuthMetadata({
+    provider: oauthProvider,
+    issuerUrl,
+    baseUrl: issuerUrl,
+    scopesSupported: config.oauth.scopes,
+  });
+  oauthMetadata.authorization_response_iss_parameter_supported = true;
   const bearerAuth = requireBearerAuth({
     verifier: oauthProvider,
     requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
@@ -1708,39 +1739,8 @@ export function createServer(
     getLocalAgentProviderAvailabilitySnapshot(),
   );
 
-  const logSessionCloseResults = (
-    reason: "idle_timeout" | "server_shutdown",
-    results: McpSessionCloseResult[],
-  ) => {
-    for (const result of results) {
-      if (result.error) {
-        logEvent(config.logging, "warn", "mcp_session_close_failed", {
-          reason,
-          sessionIdPrefix: sessionIdPrefix(result.sessionId),
-          error:
-            result.error instanceof Error
-              ? result.error.message
-              : String(result.error),
-        });
-        continue;
-      }
-
-      logEvent(config.logging, "info", "mcp_session_closed", {
-        reason,
-        sessionIdPrefix: sessionIdPrefix(result.sessionId),
-      });
-    }
-  };
-
-  const sessionCleanupTimer = setInterval(() => {
-    void transports
-      .closeIdle(MCP_SESSION_IDLE_TIMEOUT_MS)
-      .then((results) => logSessionCloseResults("idle_timeout", results));
-  }, MCP_SESSION_CLEANUP_INTERVAL_MS);
-  sessionCleanupTimer.unref();
-
   if (config.logging.trustProxy) {
-    app.set("trust proxy", true);
+    app.set("trust proxy", 1);
   }
 
   app.use((req, res, next) => {
@@ -1763,14 +1763,83 @@ export function createServer(
       });
     });
 
+    res.on("close", () => {
+      if (res.writableFinished || !config.logging.requests) return;
+      const path = requestPath(req);
+      if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
+
+      logEvent(config.logging, "warn", "http_response_incomplete", {
+        requestId,
+        method: req.method,
+        path,
+        status: res.statusCode,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...requestLogFields(req, config),
+      });
+    });
+
+    next();
+  });
+
+  // Local patch (not upstream): ChatGPT strict-discovery GET aliases and
+  // RFC 9207 authorization-response issuer support.
+  // Bare PRM serves the identical doc as PRM/mcp; AS/mcp serves the
+  // identical doc as bare AS. Pure GET req.url rewrite before the SDK auth
+  // router, so canonical metadataHandler serves both (identical body,
+  // content-type, CORS, query passthrough). No auth/token/funnel change.
+  // Upgrade-clobber risk: npm upgrade overwrites dist/server.js; reapply
+  // via ~/.devspace/reapply-wellknown-aliases.sh. See router.js:96-99
+  // (mcpAuthMetadataRouter serves only path-specific PRM + bare AS).
+  app.use((req, _res, next) => {
+    if (req.method !== "GET") return next();
+    const q = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+    if (req.path === "/.well-known/oauth-protected-resource")
+      req.url = "/.well-known/oauth-protected-resource/mcp" + q;
+    else if (req.path === "/.well-known/oauth-authorization-server/mcp")
+      req.url = "/.well-known/oauth-authorization-server" + q;
+    next();
+  });
+
+  app.get("/.well-known/oauth-authorization-server", (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.json(oauthMetadata);
+  });
+
+  app.options("/.well-known/oauth-protected-resource", (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.sendStatus(204);
+  });
+
+  // RFC 9207 requires the iss parameter on authorization-response redirects,
+  // including the SDK's error redirects, which bypass the provider's success
+  // path. Wrap res.redirect for the authorize endpoint and add the issuer
+  // when the redirect target omits it.
+  app.use("/authorize", (req: Request, res: Response, next: NextFunction) => {
+    const originalRedirect = res.redirect.bind(res);
+    // Express has two forms: redirect(url) and redirect(status, url).
+    // Both must pass through intact; only the URL gains the iss parameter.
+    res.redirect = ((...args: [string] | [number, string]) => {
+      let status = args.length === 2 ? args[0] : undefined;
+      let url = args[args.length - 1] as string;
+      try {
+        const target = new URL(String(url), issuerUrl);
+        if (!target.searchParams.has("iss")) {
+          target.searchParams.set("iss", issuerUrl.href);
+          url = target.toString();
+        }
+      } catch { }
+      return status === undefined ? originalRedirect(url) : originalRedirect(status, url);
+    }) as Response["redirect"];
     next();
   });
 
   app.use(
     mcpAuthRouter({
       provider: oauthProvider,
-      issuerUrl: new URL(config.publicBaseUrl),
-      baseUrl: new URL(config.publicBaseUrl),
+      issuerUrl,
+      baseUrl: issuerUrl,
       resourceServerUrl,
       scopesSupported: config.oauth.scopes,
       resourceName: "DevSpace",
@@ -1798,8 +1867,12 @@ export function createServer(
 
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
-    const sessionId = req.header("mcp-session-id");
-    const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
+
+    if (req.method === "GET" || req.method === "DELETE") {
+      res.setHeader("Allow", "POST");
+      sendJsonRpcError(res, 405, -32000, "Method not allowed; this server is stateless and only supports POST /mcp");
+      return;
+    }
 
     await new Promise<void>((resolve, reject) => {
       bearerAuth(req, res, (error?: unknown) => {
@@ -1824,57 +1897,20 @@ export function createServer(
     logEvent(config.logging, "debug", "mcp_request", {
       requestId,
       method: req.method,
-      sessionIdPresent: Boolean(sessionId),
-      sessionIdPrefix: sessionIdPrefix(sessionId),
-      isInitialize: initializeRequest,
     });
 
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const server = createMcpServer(
+      config,
+      workspaces,
+      reviewCheckpoints,
+      processSessions,
+      resolveLocalAgentProviders,
+      incomingArtifactAdapters,
+    );
+
     try {
-      let transport: Transport | undefined;
-
-      if (sessionId) {
-        transport = transports.get(sessionId);
-        if (!transport) {
-          sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
-          return;
-        }
-      } else if (initializeRequest) {
-        transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: (newSessionId) => {
-            if (transport) transports.register(newSessionId, transport);
-            logEvent(config.logging, "info", "mcp_session_created", {
-              requestId,
-              sessionIdPrefix: sessionIdPrefix(newSessionId),
-              ...requestLogFields(req, config),
-            });
-          },
-        });
-
-        transport.onclose = () => {
-          const closedSessionId = transport?.sessionId;
-          if (closedSessionId && transports.remove(closedSessionId)) {
-            logEvent(config.logging, "info", "mcp_session_closed", {
-              reason: "transport_close",
-              sessionIdPrefix: sessionIdPrefix(closedSessionId),
-            });
-          }
-        };
-
-        const server = createMcpServer(
-          config,
-          workspaces,
-          reviewCheckpoints,
-          processSessions,
-          resolveLocalAgentProviders,
-          incomingArtifactAdapters,
-        );
-        await server.connect(transport);
-      } else {
-        sendJsonRpcError(res, 400, -32000, "No valid MCP session");
-        return;
-      }
-
+      await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
       logEvent(config.logging, "error", "mcp_request_error", {
@@ -1884,6 +1920,9 @@ export function createServer(
       if (!res.headersSent) {
         sendJsonRpcError(res, 500, -32603, "Internal server error");
       }
+    } finally {
+      await transport.close().catch(() => {});
+      await server.close().catch(() => {});
     }
   });
 
@@ -1894,60 +1933,11 @@ export function createServer(
     localAgentProviders,
     close: () => {
       closePromise ??= (async () => {
-        clearInterval(sessionCleanupTimer);
-        const results = await transports.closeAll();
-        logSessionCloseResults("server_shutdown", results);
-        processSessions.shutdown();
+        await processSessions.shutdown();
         oauthProvider.close();
         workspaceStore.close?.();
       })();
       return closePromise;
     },
   };
-}
-
-async function isMainModule(): Promise<boolean> {
-  if (!process.argv[1]) return false;
-
-  const modulePath = await realpath(fileURLToPath(import.meta.url));
-  const entrypointPath = await realpath(process.argv[1]);
-  return modulePath === entrypointPath;
-}
-
-if (await isMainModule()) {
-  const { app, config, close, localAgentProviders } = createServer();
-  const httpServer = app.listen(config.port, config.host, () => {
-    console.log(
-      `devspace listening on http://${config.host}:${config.port}/mcp`,
-    );
-    console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
-    console.log("auth: oauth owner-token flow required");
-    console.log(`logging: ${config.logging.level} ${config.logging.format}`);
-    console.log(`request logging: ${config.logging.requests ? "enabled" : "disabled"}`);
-    console.log(`asset logging: ${config.logging.assets ? "enabled" : "disabled"}`);
-    console.log(`trust proxy: ${config.logging.trustProxy ? "enabled" : "disabled"}`);
-    const artifactDownloadStatus = !config.artifactsEnabled
-      ? "disabled"
-      : isArtifactDownloadSupportedPlatform()
-        ? "enabled"
-        : `unsupported on ${process.platform}`;
-    console.log(`native artifact download: ${artifactDownloadStatus}`);
-    console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
-  });
-
-  let shuttingDown = false;
-  const shutdown = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    await shutdownHttpServer(httpServer, close);
-    process.exit(0);
-  };
-  const handleShutdown = () => {
-    void shutdown().catch((error) => {
-      console.error("devspace shutdown failed", error);
-      process.exit(1);
-    });
-  };
-  process.once("SIGINT", handleShutdown);
-  process.once("SIGTERM", handleShutdown);
 }
