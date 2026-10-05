@@ -180,12 +180,12 @@ a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
 
 ## Show Changes
 
-By default, `DEVSPACE_WIDGETS=full`.
+By default, `DEVSPACE_WIDGETS=off`: tool results are text only.
 
-In that mode, DevSpace attaches widget UI to the exposed workspace, file, edit,
+With `DEVSPACE_WIDGETS=full`, DevSpace attaches widget UI to the exposed workspace, file, edit,
 and shell tools. The aggregate `show_changes` tool is not exposed by default.
 
-Use `DEVSPACE_WIDGETS=off` to disable widget UI, or `DEVSPACE_WIDGETS=changes`
+Use `DEVSPACE_WIDGETS=changes`
 to expose the aggregate show-changes flow.
 
 When `show_changes` is exposed, call it exactly once after the final file

@@ -105,17 +105,32 @@ function sanitizePathSegment(value) {
         .replace(/^-+|-+$/g, "")
         .slice(0, 80);
 }
+// Default budget mirrors the 10s execFile timeout already used for repo_status
+// in server.js. `worktree add` on a large real repo (polymarket-arbitrage,
+// 1.3GB .git, 1755 branches) measured well under 1s; 15s leaves a wide margin
+// while keeping the call bounded well inside the ~30s tool-call yield window.
+const DEFAULT_GIT_TIMEOUT_MS = 10_000;
+const GIT_TIMEOUT_MS_BY_SUBCOMMAND = {
+    worktree: 15_000,
+};
 async function git(args, cwd) {
+    const timeoutMs = GIT_TIMEOUT_MS_BY_SUBCOMMAND[args[0]] ?? DEFAULT_GIT_TIMEOUT_MS;
     try {
         const { stdout } = await execFileAsync("git", args, {
             cwd,
+            env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
             maxBuffer: 10 * 1024 * 1024,
+            timeout: timeoutMs,
+            killSignal: "SIGTERM",
         });
         return stdout;
     }
     catch (error) {
         if (isGitUnavailable(error))
             throw error;
+        if (error && typeof error === "object" && error.killed) {
+            throw new Error(`git ${args.join(" ")} timed out after ${timeoutMs}ms`);
+        }
         const stderr = typeof error === "object" && error && "stderr" in error
             ? String(error.stderr ?? "").trim()
             : "";

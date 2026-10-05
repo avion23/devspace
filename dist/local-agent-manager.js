@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { Result } from "better-result";
-import { AgentConflictError, AgentScopeError, AgentTargetError, isLocalAgentError, isProgrammerDefect, } from "./local-agent-errors.js";
+import { AgentConflictError, AgentScopeError, AgentTargetError, errorMessage, isLocalAgentError, isProgrammerDefect, } from "./local-agent-errors.js";
 import { isLocalAgentProvider, } from "./local-agent-profiles.js";
 import { blockedModelMessage, isBlockedLocalAgentModel, resolveLocalAgentSettings, resolveLocalAgentTarget, } from "./local-agent-targets.js";
 import { assertAllowedPath } from "./roots.js";
@@ -511,9 +511,6 @@ export class LocalAgentManager {
 }
 export function createLocalAgentManager(options) {
     return new LocalAgentManager(options);
-}
-function errorMessage(error) {
-    return error instanceof Error ? error.message : String(error);
 }
 function safeCauseType(cause) {
     if (cause instanceof Error)

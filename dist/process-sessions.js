@@ -1,14 +1,32 @@
 import { spawn } from "node:child_process";
+import { createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+import { expandHomePath } from "./roots.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 const DEFAULT_EXEC_YIELD_MS = 10_000;
 const DEFAULT_INTERACTIVE_YIELD_MS = 250;
 const DEFAULT_POLL_YIELD_MS = 5_000;
 const MAX_YIELD_MS = 30_000;
-const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
+// Bash is 59% of production tool calls and routinely returns build/test logs.
+// ChatGPT web has far less headroom per tool call than a CLI/editor host (Codex
+// exec defaults to ~10k tokens there); at 10k tokens/call, a handful of bash
+// calls already dominate the conversation. 3k tokens (~12KB via the 4-char
+// heuristic below) still fits a command's head plus the tail where build
+// errors live, and the full output always stays on disk (see logPath) for
+// follow-up rg/sed. Callers can still raise this up to the 100k cap.
+const DEFAULT_MAX_OUTPUT_TOKENS = 3_000;
 const DEFAULT_BUFFER_CHARACTERS = 1_000_000;
 const COMPLETED_SESSION_TTL_MS = 5 * 60 * 1_000;
+// How long a session's full-output log survives after the process exits:
+// long enough for the model to rg/sed-n it in a follow-up call, short enough
+// to bound disk growth without per-directory size accounting.
+const DEFAULT_LOG_RETENTION_MS = 15 * 60 * 1_000;
 const DEFAULT_COLUMNS = 80;
 const DEFAULT_ROWS = 24;
+function defaultStateDir() {
+    return resolve(expandHomePath(process.env.DEVSPACE_STATE_DIR ?? join(homedir(), ".local", "share", "devspace")));
+}
 function boundedInteger(value, fallback, maximum) {
     if (value === undefined)
         return fallback;
@@ -63,11 +81,6 @@ function splitBudget(maxCharacters) {
         tail: Math.floor(maxCharacters / 2),
     };
 }
-function formatHeadTail(head, tail, omittedCharacters) {
-    if (omittedCharacters <= 0)
-        return head + tail;
-    return `${head}\n... output truncated (${omittedCharacters} characters omitted) ...\n${tail}`;
-}
 export class HeadTailBuffer {
     maxCharacters;
     head = "";
@@ -100,32 +113,26 @@ export class HeadTailBuffer {
     hasOutput() {
         return this.totalCharacters > 0;
     }
+    // Returns the raw retained text plus how much was omitted, without a
+    // formatted marker: the caller knows the session's log path and can
+    // report where the omitted portion can still be read.
     drain(maxCharacters) {
         if (!Number.isInteger(maxCharacters) || maxCharacters < 1) {
             throw new Error("Output limit must be a positive integer.");
         }
         const omittedByBuffer = Math.max(0, this.totalCharacters - codePointLength(this.head) - codePointLength(this.tail));
-        const retained = formatHeadTail(this.head, this.tail, omittedByBuffer);
-        const output = truncateOutput(retained, maxCharacters);
-        const truncated = omittedByBuffer > 0 || output.truncated;
+        const combined = this.head + this.tail;
+        const combinedCharacters = codePointLength(combined);
+        const budget = splitBudget(maxCharacters);
+        const fitsBudget = combinedCharacters <= maxCharacters;
+        const text = fitsBudget ? combined : takeHead(combined, budget.head) + takeTail(combined, budget.tail);
+        const omittedByBudget = fitsBudget ? 0 : combinedCharacters - budget.head - budget.tail;
+        const omittedCharacters = omittedByBuffer + omittedByBudget;
         this.head = "";
         this.tail = "";
         this.totalCharacters = 0;
-        return { output: output.output, truncated };
+        return { text, omittedCharacters, truncated: omittedCharacters > 0 };
     }
-}
-function truncateOutput(output, maxCharacters) {
-    const outputCharacters = codePointLength(output);
-    if (outputCharacters <= maxCharacters)
-        return { output, truncated: false };
-    const marker = "\n... output truncated ...\n";
-    const markerCharacters = codePointLength(marker);
-    const available = Math.max(0, maxCharacters - markerCharacters);
-    const budget = splitBudget(available);
-    return {
-        output: takeHead(output, budget.head) + marker + takeTail(output, budget.tail),
-        truncated: true,
-    };
 }
 export class ProcessSessionManager {
     sessions = new Map();
@@ -135,6 +142,67 @@ export class ProcessSessionManager {
     constructor(options = {}) {
         this.maxBufferCharacters = options.maxBufferCharacters ?? DEFAULT_BUFFER_CHARACTERS;
         this.completedSessionTtlMs = options.completedSessionTtlMs ?? COMPLETED_SESSION_TTL_MS;
+        this.logDir = resolve(expandHomePath(options.logDir ?? join(defaultStateDir(), "process-logs")));
+        this.logRetentionMs = options.logRetentionMs ?? DEFAULT_LOG_RETENTION_MS;
+        this.logDirReady = false;
+        // Crash/restart recovery: timers that would delete a finished session's
+        // log don't survive process death, so sweep stale logs on startup too.
+        this.reapStaleLogs();
+    }
+    reapStaleLogs() {
+        let entries;
+        try {
+            entries = readdirSync(this.logDir, { withFileTypes: true });
+        }
+        catch {
+            return;
+        }
+        const cutoff = Date.now() - this.logRetentionMs;
+        for (const entry of entries) {
+            if (!entry.isFile())
+                continue;
+            const path = join(this.logDir, entry.name);
+            try {
+                if (statSync(path).mtimeMs < cutoff)
+                    unlinkSync(path);
+            }
+            catch { }
+        }
+    }
+    ensureLogDir() {
+        if (this.logDirReady)
+            return;
+        mkdirSync(this.logDir, { recursive: true, mode: 0o700 });
+        this.logDirReady = true;
+    }
+    // Best-effort: a disk/stream failure disables logging for this session but
+    // must never fail the command it is observing.
+    openSessionLog(session) {
+        const path = join(this.logDir, `session-${session.id}-${session.startedAt}.log`);
+        try {
+            this.ensureLogDir();
+            const stream = createWriteStream(path, { flags: "a", mode: 0o600 });
+            stream.on("error", () => {
+                session.logStream = undefined;
+            });
+            session.logStream = stream;
+            return path;
+        }
+        catch {
+            return undefined;
+        }
+    }
+    discardLog(session) {
+        if (session.logStream) {
+            session.logStream.end();
+            session.logStream = undefined;
+        }
+        if (session.logPath) {
+            try {
+                unlinkSync(session.logPath);
+            }
+            catch { }
+        }
     }
     async start(input) {
         // Validate before spawning: rejected limits must not leave a child behind.
@@ -152,6 +220,7 @@ export class ProcessSessionManager {
                 this.startPipe(session, input);
         }
         catch (error) {
+            this.discardLog(session);
             this.sessions.delete(session.id);
             throw error;
         }
@@ -216,37 +285,25 @@ export class ProcessSessionManager {
             this.stop(session, "SIGTERM");
     }
     stop(session, signal) {
-        try {
-            session.process?.kill(signal);
-        }
-        catch (error) {
-            this.fail(session, error);
-            return;
-        }
+        session.process?.kill(signal);
         // Escalate even if the shell exits: descendants can ignore the signal
         // and close their pipes. Shutdown must await this tree cleanup too.
         session.terminationPromise ??= new Promise((resolve) => {
             setTimeout(() => {
-                try {
-                    session.process?.kill("SIGKILL");
-                    // Detached groups are outside ownership but may retain our pipes.
-                    // Close those handles after the normal drain/termination grace.
-                    session.process?.closeStdio?.();
-                }
-                catch (error) {
-                    this.fail(session, error);
-                }
-                finally {
-                    resolve();
-                }
+                session.process?.kill("SIGKILL");
+                // Detached groups are outside ownership but may retain our pipes.
+                // Close those handles after the normal drain/termination grace.
+                session.process?.closeStdio?.();
+                resolve();
             }, 1_000);
         });
     }
     async shutdown() {
         const sessions = [...this.sessions.values()];
-        const runningSessions = sessions.filter((session) => session.running);
-        for (const session of runningSessions)
-            this.stop(session, "SIGTERM");
+        for (const session of sessions) {
+            if (session.running)
+                this.stop(session, "SIGTERM");
+        }
         await Promise.all(sessions.map(async (session) => {
             await session.terminationPromise;
             await session.exitPromise;
@@ -254,10 +311,6 @@ export class ProcessSessionManager {
                 clearTimeout(session.cleanupTimer);
         }));
         this.sessions.clear();
-        for (const session of runningSessions) {
-            if (session.failure)
-                this.throwIfFailed(session, this.consume(session).output);
-        }
     }
     async waitForExit(session, yieldTimeMs) {
         if (session.failure)
@@ -281,17 +334,20 @@ export class ProcessSessionManager {
         const exitPromise = new Promise((resolve) => {
             resolveExit = resolve;
         });
-        return {
+        const session = {
             id: this.nextSessionId++,
             workspaceId: input.workspaceId,
             startedAt: Date.now(),
             columns: terminalSize(input.columns, DEFAULT_COLUMNS),
             rows: terminalSize(input.rows, DEFAULT_ROWS),
             buffer: new HeadTailBuffer(this.maxBufferCharacters),
+            loggedBytes: 0,
             running: true,
             exitPromise,
             resolveExit,
         };
+        session.logPath = this.openSessionLog(session);
+        return session;
     }
     startPipe(session, input) {
         const shell = resolveShellCommand(input.command);
@@ -315,6 +371,11 @@ export class ProcessSessionManager {
         session.process = {
             write: (data) => child.stdin.write(data),
             kill: (signal = "SIGTERM") => terminateProcessTree(child, signal, detached),
+            destroy: () => {
+                child.stdin.destroy();
+                child.stdout.destroy();
+                child.stderr.destroy();
+            },
             resize: input.tty ? () => undefined : undefined,
             closeStdio: () => {
                 child.stdin.destroy();
@@ -371,7 +432,7 @@ export class ProcessSessionManager {
         if (!session.running)
             return;
         // Do not publish completion while descendants still have the kill grace.
-        if (!session.failure && session.terminationPromise && !session.terminationComplete) {
+        if (session.terminationPromise && !session.terminationComplete) {
             void session.terminationPromise.then(() => {
                 session.terminationComplete = true;
                 this.finish(session, exitCode, signal);
@@ -385,6 +446,20 @@ export class ProcessSessionManager {
         session.exitCode = exitCode;
         session.signal = signal;
         session.resolveExit();
+        if (session.logStream) {
+            session.logStream.end();
+            session.logStream = undefined;
+        }
+        if (session.logPath) {
+            const logPath = session.logPath;
+            session.logCleanupTimer = setTimeout(() => {
+                try {
+                    unlinkSync(logPath);
+                }
+                catch { }
+            }, this.logRetentionMs);
+            session.logCleanupTimer.unref();
+        }
         session.cleanupTimer = setTimeout(() => this.sessions.delete(session.id), this.completedSessionTtlMs);
         session.cleanupTimer.unref();
     }
@@ -396,33 +471,45 @@ export class ProcessSessionManager {
         try {
             session.process?.kill("SIGKILL");
         }
-        catch (cleanupError) {
-            this.append(session, `Process kill failed: ${cleanupError}\n`);
-        }
+        catch { }
         try {
-            session.process?.closeStdio?.();
+            session.process?.destroy?.();
         }
-        catch (cleanupError) {
-            this.append(session, `Process stream cleanup failed: ${cleanupError}\n`);
-        }
+        catch { }
         this.finish(session, undefined, "SIGKILL");
     }
     throwIfFailed(session, output) {
         if (!session.failure)
             return;
-        throw new Error(`Process I/O failed: ${output || session.failure.message}`, { cause: session.failure });
+        throw new Error(`Process I/O failed: ${output || session.failure.message}`);
     }
     append(session, output) {
         session.buffer.append(output);
+        if (session.logStream) {
+            session.loggedBytes += Buffer.byteLength(output, "utf8");
+            session.logStream.write(output);
+        }
+    }
+    // Errors at the end are why head+tail beats a simple head truncation: the
+    // marker carries the exact omitted size and the absolute log path holding
+    // the complete output, so the model can rg/sed-n it instead of rerunning.
+    truncationMarker(session, omittedCharacters) {
+        const logNote = session.logPath
+            ? `full output (${session.loggedBytes} bytes) logged at ${session.logPath} -- use rg or sed -n on that path to inspect the rest`
+            : "full output was not retained on disk (log unavailable)";
+        return `\n... output truncated: ${omittedCharacters} characters omitted; ${logNote} ...`;
     }
     consume(session, maxOutputTokens) {
         const limit = boundedInteger(maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
         const maxCharacters = Math.max(256, limit * 4);
-        const buffered = session.buffer.drain(maxCharacters);
+        const drained = session.buffer.drain(maxCharacters);
+        const output = drained.truncated
+            ? drained.text + this.truncationMarker(session, drained.omittedCharacters)
+            : drained.text;
         return {
             sessionId: session.running ? session.id : undefined,
-            output: buffered.output,
-            outputTruncated: buffered.truncated,
+            output,
+            outputTruncated: drained.truncated,
             running: session.running,
             exitCode: session.exitCode,
             signal: session.signal,

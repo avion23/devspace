@@ -253,7 +253,7 @@ If a skill appears in `open_workspace`, the model must read that skill's
 
 ## Review Card Does Not Appear
 
-Per-tool widget cards are enabled by default with:
+Widget cards are off by default. Enable per-tool cards with:
 
 ```bash
 DEVSPACE_WIDGETS=full

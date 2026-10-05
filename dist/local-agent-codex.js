@@ -4,7 +4,7 @@ import { realpathSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { isSandboxFallbackEnabled } from "./local-agent-config.js";
-import { AgentProviderExecutionError, AgentProviderProtocolError, AgentProviderUnavailableError, AgentSandboxUnavailableError, captureAgentProviderResult, } from "./local-agent-errors.js";
+import { AgentProviderExecutionError, AgentProviderProtocolError, AgentProviderUnavailableError, AgentSandboxUnavailableError, captureAgentProviderResult, errorMessage, } from "./local-agent-errors.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import { terminateProcessTree } from "./process-platform.js";
 import { resolveAllowedPath } from "./roots.js";
@@ -810,9 +810,6 @@ function protocolErrorText(value) {
     const message = directString(record.message);
     const code = record.code;
     return message ? `codex app-server${code === undefined ? "" : ` ${String(code)}`}: ${message}` : String(value);
-}
-function errorMessage(error) {
-    return error instanceof Error ? error.message : String(error);
 }
 function appendTail(value, chunk, maxBytes) {
     const next = value + chunk;

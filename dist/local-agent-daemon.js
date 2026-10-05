@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
-import { AgentDaemonBusyError, AgentDaemonInternalError, AgentDaemonInvalidRequestError, AgentDaemonProtocolMismatchError, AgentDaemonTimeoutError, AgentDaemonUnauthorizedError, AgentDaemonUnavailableError, isLocalAgentError, toAgentErrorPayload, } from "./local-agent-errors.js";
+import { AgentDaemonBusyError, AgentDaemonInternalError, AgentDaemonInvalidRequestError, AgentDaemonProtocolMismatchError, AgentDaemonTimeoutError, AgentDaemonUnauthorizedError, AgentDaemonUnavailableError, errorMessage, isLocalAgentError, toAgentErrorPayload, } from "./local-agent-errors.js";
 import { LOCAL_AGENT_DAEMON_PROTOCOL_VERSION, LocalAgentDaemonAlreadyRunningError, LocalAgentDaemonLock, ensureLocalAgentDaemonStateDir, ensureLocalAgentDaemonSecret, localAgentDaemonPaths, removeLocalAgentDaemonFiles, } from "./local-agent-daemon-lifecycle.js";
 import { decodeLocalAgentDaemonRequest, encodeLocalAgentDaemonResponse, LocalAgentDaemonProtocolError, } from "./local-agent-daemon-protocol.js";
 const MAX_REQUEST_BYTES = 512 * 1024;
@@ -373,9 +373,6 @@ export function readLocalAgentDaemonLogs(paths, lines = 200) {
     catch {
         return "";
     }
-}
-function errorMessage(error) {
-    return error instanceof Error ? error.message : String(error);
 }
 function daemonErrorPayload(error) {
     if (isLocalAgentError(error))

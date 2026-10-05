@@ -90,7 +90,8 @@ effective `sandboxFallback`, and `sandboxProbe` with `outcome` (`ok`, `denied`,
 does not print metadata generally; fallback warning lines are appended when
 warnings are present, along with the sticky exposure marker when it is set.
 
-The daemon build reports `1.0.8-r13`. An older daemon is not stopped
+The daemon build reports the package version plus the current fork revision
+(see `dist/fork-revision.js`), e.g. `1.0.8-r19`. An older daemon is not stopped
 automatically during a protocol upgrade: drain and stop it with its matching
 CLI, then retry the new command. A normal `daemon stop` is non-forceful; use
 `--force` only when immediate shutdown is intentional.
