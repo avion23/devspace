@@ -17,10 +17,17 @@ proxy.
 
 ## Install And Configure
 
-Run:
+Install this fork first — see [`README.md`](../README.md#install) for the
+exact command. Do not use `npm install -g @waishnav/devspace`, `npx
+@waishnav/devspace`, or `npm update -g`/`npm upgrade` to install or update it:
+all of these pull the unmodified upstream package from the npm registry and
+overwrite this fork's patches (see the WARNING in `README.md`). Upgrades come
+only from this repo's tags, also documented there.
+
+Once installed, the `devspace` command is on your `PATH`. Run:
 
 ```bash
-npx @waishnav/devspace init
+devspace init
 ```
 
 The setup flow asks one question at a time.
@@ -54,8 +61,8 @@ remain limited to the roots configured for ChatGPT.
 
 ### Coding Agents
 
-Setup detects supported Coding Agents and asks which ones DevSpace may use.
-These choices are stored as provider objects under `subagents` in
+This fork supports only the `codex` provider; setup asks whether to enable it.
+That choice is stored as a provider object under `subagents` in
 `~/.devspace/config.json`.
 
 If you selected Coding Agents, setup prints:
@@ -64,9 +71,10 @@ If you selected Coding Agents, setup prints:
 npx skills add Waishnav/devspace --skill subagents --global
 ```
 
-The Skills CLI asks which installed Coding Agents should receive the skill.
-The skill uses `devspace agents targets`, `run`, `continue`, `show`, and `ls`.
-These commands do not require `devspace serve`.
+The Skills CLI asks which installed coding agents should receive the skill.
+The skill itself only drives this fork's `codex` provider through `devspace
+agents targets`, `run`, `continue`, `show`, and `ls`. These commands do not
+require `devspace serve`.
 
 ### Connect ChatGPT
 
@@ -96,20 +104,20 @@ A Coding Agents-only setup skips this section.
 Run:
 
 ```bash
-npx @waishnav/devspace serve
+devspace serve
 ```
 
 If your tunnel URL changes for one run, override it without rewriting config:
 
 ```bash
-DEVSPACE_PUBLIC_BASE_URL="https://new-tunnel.example.com" npx @waishnav/devspace serve
+DEVSPACE_PUBLIC_BASE_URL="https://new-tunnel.example.com" devspace serve
 ```
 
 For a stable public URL, persist it:
 
 ```bash
-npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
-npx @waishnav/devspace serve
+devspace config set publicBaseUrl https://devspace.example.com
+devspace serve
 ```
 
 ## Approve The Client
@@ -131,7 +139,7 @@ Keep `auth.json` private.
 Run:
 
 ```bash
-npx @waishnav/devspace doctor
+devspace doctor
 ```
 
 The doctor command reports the resolved config, Node version, Node ABI, platform,
