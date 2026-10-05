@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { appendFileSync, chmodSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type Server as NetServer, type Socket } from "node:net";
 import {
+  AgentDaemonBusyError,
   AgentDaemonInternalError,
   AgentDaemonInvalidRequestError,
   AgentDaemonInvalidResponseError,
@@ -9,6 +10,7 @@ import {
   AgentDaemonTimeoutError,
   AgentDaemonUnauthorizedError,
   AgentDaemonUnavailableError,
+  errorMessage,
   isLocalAgentError,
   toAgentErrorPayload,
 } from "./local-agent-errors.js";
@@ -28,7 +30,9 @@ import {
   type LocalAgentDaemonRequest,
   type LocalAgentDaemonErrorPayload,
   type LocalAgentDaemonResponse,
+  type LocalAgentDaemonSandboxFallback,
   type LocalAgentDaemonStatus,
+  type LocalAgentSandboxProbeState,
   LocalAgentDaemonProtocolError,
 } from "./local-agent-daemon-protocol.js";
 import type { Result } from "better-result";
@@ -57,6 +61,7 @@ export interface LocalAgentDaemonManager {
   close(): Promise<void>;
   readonly activeTurnCount: number;
   readonly runtimeCount: number;
+  stopAdmission?(): void;
 }
 
 export interface LocalAgentDaemonOptions {
@@ -70,6 +75,9 @@ export interface LocalAgentDaemonOptions {
   paths?: LocalAgentDaemonPaths;
   onLockAcquired?: () => void | Promise<void>;
   onClosed?: () => void;
+  buildVersion?: string;
+  sandboxFallback?: LocalAgentDaemonSandboxFallback;
+  getSandboxProbeState?: () => LocalAgentSandboxProbeState | undefined;
 }
 
 export class LocalAgentDaemon {
@@ -93,6 +101,9 @@ export class LocalAgentDaemon {
   private stopping = false;
   private authToken?: string;
   private ownsLock = false;
+  private readonly buildVersion: string;
+  private readonly sandboxFallback: LocalAgentDaemonSandboxFallback;
+  private readonly getSandboxProbeState?: () => LocalAgentSandboxProbeState | undefined;
 
   constructor(options: LocalAgentDaemonOptions) {
     this.paths = options.paths ?? localAgentDaemonPaths(options.stateDir);
@@ -105,6 +116,9 @@ export class LocalAgentDaemon {
     this.now = options.now ?? Date.now;
     this.onLockAcquired = options.onLockAcquired;
     this.onClosed = options.onClosed;
+    this.buildVersion = options.buildVersion ?? "unknown";
+    this.sandboxFallback = options.sandboxFallback ?? "fail";
+    this.getSandboxProbeState = options.getSandboxProbeState;
     if (!Number.isFinite(this.idleShutdownMs) || this.idleShutdownMs < 0) {
       throw new Error("Agent daemon idle shutdown must be a non-negative finite duration.");
     }
@@ -160,6 +174,7 @@ export class LocalAgentDaemon {
   status(): LocalAgentDaemonStatus {
     if (!this.startedAt) throw new Error("Local agent daemon is not started.");
     return {
+      version: this.buildVersion,
       state: this.stopping ? "stopping" : "ready",
       protocolVersion: LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
       pid: process.pid,
@@ -168,12 +183,15 @@ export class LocalAgentDaemon {
       activeTurns: this.manager.activeTurnCount,
       runtimeCount: this.manager.runtimeCount,
       clientConnections: this.sockets.size,
+      sandboxFallback: this.sandboxFallback,
+      sandboxProbe: normalizeSandboxProbeState(this.getSandboxProbeState?.(), this.startedAt),
     };
   }
 
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     if (!this.ownsLock && !this.server) return;
+    if (this.accepting) this.manager.stopAdmission?.();
     this.accepting = false;
     this.stopping = true;
     if (this.idleTimer) clearInterval(this.idleTimer);
@@ -310,8 +328,18 @@ export class LocalAgentDaemon {
       case "daemon.status":
         return this.status();
       case "daemon.stop":
+        if (!request.params.force && this.manager.activeTurnCount > 0) {
+          throw new AgentDaemonBusyError({
+            code: "DAEMON_BUSY",
+            operation: "daemon.stop",
+            retryable: true,
+            activeTurns: this.manager.activeTurnCount,
+            message: "Local agent daemon has active turns; retry after they finish or force the stop.",
+          });
+        }
         this.stopping = true;
         this.accepting = false;
+        this.manager.stopAdmission?.();
         return this.status();
       case "daemon.logs":
         return readLocalAgentDaemonLogs(this.paths, request.params.lines);
@@ -424,10 +452,6 @@ export function readLocalAgentDaemonLogs(paths: LocalAgentDaemonPaths, lines = 2
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function daemonErrorPayload(error: unknown): LocalAgentDaemonErrorPayload {
   if (isLocalAgentError(error)) return toAgentErrorPayload(error);
   if (error instanceof LocalAgentDaemonProtocolError) {
@@ -469,4 +493,17 @@ function daemonErrorPayload(error: unknown): LocalAgentDaemonErrorPayload {
 function unwrapManagerResult<T, E>(result: Result<T, E>): T {
   if (result.isErr()) throw result.error;
   return result.value;
+}
+
+function normalizeSandboxProbeState(
+  state: LocalAgentSandboxProbeState | undefined,
+  fallbackAt: string,
+): LocalAgentSandboxProbeState {
+  const outcome = state?.outcome;
+  return {
+    outcome: outcome === "ok" || outcome === "denied" || outcome === "indeterminate" || outcome === "unknown"
+      ? outcome
+      : "unknown",
+    at: typeof state?.at === "string" && state.at.length > 0 ? state.at : fallbackAt,
+  };
 }
