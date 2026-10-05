@@ -3,7 +3,7 @@ schema: devspace-agent/v1
 name: codex-qa-tester
 description: Manual QA profile for browser testing, workflow verification, and regression checks.
 provider: codex
-model: gpt-5.4-mini
+model: gpt-5.6-sol
 effort: high
 ---
 
