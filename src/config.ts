@@ -85,6 +85,13 @@ function parseBoolean(value: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(value?.toLowerCase() ?? "");
 }
 
+function parseTrustProxy(value: string | undefined): boolean {
+  // DevSpace always runs behind exactly one local reverse proxy (the
+  // loopback-bound server is never exposed directly), so trust-proxy
+  // defaults on; set DEVSPACE_TRUST_PROXY=0 to disable explicitly.
+  return value === undefined ? true : parseBoolean(value);
+}
+
 function parseToolMode(env: NodeJS.ProcessEnv): ToolMode {
   const mode = env.DEVSPACE_TOOL_MODE;
   if (mode === "minimal" || mode === "full" || mode === "codex") return mode;
@@ -152,13 +159,13 @@ function parseLoggingConfig(env: NodeJS.ProcessEnv): LoggingConfig {
     assets: parseBoolean(env.DEVSPACE_LOG_ASSETS),
     toolCalls: env.DEVSPACE_LOG_TOOL_CALLS === undefined ? true : parseBoolean(env.DEVSPACE_LOG_TOOL_CALLS),
     shellCommands: parseBoolean(env.DEVSPACE_LOG_SHELL_COMMANDS),
-    trustProxy: parseBoolean(env.DEVSPACE_TRUST_PROXY),
+    trustProxy: parseTrustProxy(env.DEVSPACE_TRUST_PROXY),
   };
 }
 
 function parseWidgetMode(value: string | undefined): WidgetMode {
-  if (!value || value === "full") return "full";
-  if (value === "off" || value === "changes") return value;
+  if (!value || value === "off") return "off";
+  if (value === "changes" || value === "full") return value;
 
   throw new Error(`Invalid DEVSPACE_WIDGETS: ${value}`);
 }
