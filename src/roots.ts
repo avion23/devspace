@@ -1,5 +1,6 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export class AccessDeniedError extends Error {
   constructor(message: string) {
@@ -40,7 +41,76 @@ export function assertAllowedPath(path: string, allowedRoots: string[]): string 
   throw new AccessDeniedError(`Path is outside allowed roots: ${path}`);
 }
 
-export function resolveAllowedPath(inputPath: string, cwd: string, allowedRoots: string[]): string {
-  const absolutePath = resolve(cwd, inputPath);
-  return assertAllowedPath(absolutePath, allowedRoots);
+function realpathOfClosestExistingAncestor(absolutePath: string): { realParent: string; missingSuffix: string[] } {
+  let current = absolutePath;
+  let missingSuffix: string[] = [];
+  for (;;) {
+    try {
+      return { realParent: realpathSync(current), missingSuffix };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR")
+        throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missingSuffix.unshift(basename(current));
+      current = parent;
+    }
+  }
+}
+
+function tryRealpath(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+export function resolveAllowedPath(
+  inputPath: string,
+  cwd: string,
+  allowedRoots: string[],
+  { followFinal = false }: { followFinal?: boolean } = {},
+): string {
+  const candidate = assertAllowedPath(resolve(cwd, expandHomePath(inputPath)), allowedRoots);
+
+  // Lexical containment is not enough: an intermediate symlinked directory
+  // (root/evil -> /etc) makes root/evil/passwd lexically inside the root while
+  // actually resolving outside it. Canonicalize through the closest existing
+  // ancestor and re-assert containment against both the lexical and the real
+  // roots. The FINAL component is realpathed only for callers that follow
+  // it; delete/move keep their historical leaf-symlink semantics and lstat it.
+  const { realParent, missingSuffix } = realpathOfClosestExistingAncestor(dirname(candidate));
+  let canonical = resolve(realParent, ...missingSuffix, basename(candidate));
+
+  if (followFinal) {
+    let finalStats;
+    try {
+      finalStats = lstatSync(canonical);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ENOTDIR")
+        throw error;
+    }
+    if (finalStats?.isSymbolicLink()) {
+      try {
+        canonical = realpathSync(canonical);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") {
+          throw new AccessDeniedError(`Path has a dangling final symlink: ${inputPath}`);
+        }
+        throw error;
+      }
+    }
+  }
+
+  const canonicalRoots = allowedRoots.flatMap((root) => {
+    const real = tryRealpath(resolve(expandHomePath(root)));
+    return real ? [root, real] : [root];
+  });
+
+  try {
+    return assertAllowedPath(canonical, canonicalRoots);
+  } catch {
+    throw new AccessDeniedError(`Path resolves outside allowed roots: ${inputPath}`);
+  }
 }
