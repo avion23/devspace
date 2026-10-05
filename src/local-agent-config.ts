@@ -9,11 +9,20 @@ const providerSchema = z.object({
   enabled: z.boolean(),
   model: z.string().trim().min(1).optional(),
   effort: z.string().trim().min(1).optional(),
+  /**
+   * Force every codex turn onto the unsandboxed danger-full-access path.
+   * "auto" (default) keeps the OS sandbox (bwrap) selected by write mode.
+   */
+  sandboxMode: z.enum(["auto", "full-access"]).optional(),
 }).strict();
 
 const subagentsSchema = z.object({
   enabled: z.boolean(),
   providers: z.array(providerSchema),
+  sandboxFallback: z.preprocess(
+    (value) => value === false ? "fail" : value,
+    z.enum(["fail", "worktree-embedded"]),
+  ).default("fail"),
 }).strict().superRefine((value, context) => {
   const seen = new Set<LocalAgentProvider>();
   for (const [index, provider] of value.providers.entries()) {
@@ -37,7 +46,7 @@ export function resolveSubagentsConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SubagentsConfig {
   const stored = value === undefined
-    ? { enabled: false, providers: [] }
+    ? { enabled: false, providers: [], sandboxFallback: "fail" as const }
     : typeof value === "boolean"
       ? legacySubagentsConfig(value)
       : subagentsSchema.parse(value);
@@ -56,11 +65,22 @@ export function subagentProviderConfig(
   return config.providers.find((entry) => entry.id === provider);
 }
 
+export function isProviderFullAccess(
+  config: SubagentsConfig,
+  provider: LocalAgentProvider,
+): boolean {
+  return subagentProviderConfig(config, provider)?.sandboxMode === "full-access";
+}
+
 export function isSubagentProviderEnabled(
   config: SubagentsConfig,
   provider: LocalAgentProvider,
 ): boolean {
   return config.enabled && subagentProviderConfig(config, provider)?.enabled === true;
+}
+
+export function isSandboxFallbackEnabled(value: SubagentsConfig["sandboxFallback"]): boolean {
+  return value === "worktree-embedded";
 }
 
 function legacySubagentsConfig(enabled: boolean): SubagentsConfig {
@@ -69,6 +89,7 @@ function legacySubagentsConfig(enabled: boolean): SubagentsConfig {
     providers: enabled
       ? LOCAL_AGENT_PROVIDERS.map((id) => ({ id, enabled: true }))
       : [],
+    sandboxFallback: "fail",
   };
 }
 
