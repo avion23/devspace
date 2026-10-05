@@ -160,9 +160,8 @@ instructions".
   `PATCHES.md` and `docs/local-agent-daemon.md`, runs `npm ci`, `npm test`
   and `scripts/smoke.mjs` against a packed install, commits, tags
   `v<version>-rN`, pushes, and runs `scripts/deploy.sh`.
-- `scripts/deploy.sh <tag>` installs a tag globally from git (npm runs the
-  `prepare` build), restarts
-  `devspace.service`, and checks local and public `/healthz` and `GET /mcp`
+- `scripts/deploy.sh <tag>` clones the tag, builds and packs it, installs
+  the tarball globally, restarts `devspace.service`, and checks local and public `/healthz` and `GET /mcp`
   (405). Revert: run it with the previous tag.
 - `scripts/smoke.mjs [package-dir]` starts `serve` on a free port with a
   temporary HOME and checks OAuth, the stateless transport, the 30 s yield,

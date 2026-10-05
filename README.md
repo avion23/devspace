@@ -5,8 +5,13 @@ Maintained fork of [`@waishnav/devspace`](https://www.npmjs.com/package/@waishna
 ## Install
 
 ```
-npm i -g git+https://github.com/avion23/devspace.git#v1.0.8-r21
+scripts/deploy.sh v1.0.8-r21
 ```
+
+`deploy.sh` clones the tag, builds it (`dist/` is not committed), installs the
+packed tarball globally, and restarts `devspace.service`. Without the service,
+do the same by hand: clone the tag, `npm ci --ignore-scripts`, `npm pack`,
+`npm i -g <tarball>`.
 
 ## Command and read behavior
 
@@ -46,7 +51,7 @@ Do NOT run any of these on a host running this fork — each overwrites the patc
 - `npm update -g`, `npm upgrade`, `npm update -g @waishnav/devspace` — PROVEN by dry-run to reinstall 1.0.8 from the registry even when the installed version is already 1.0.8 (`npm update -g --dry-run` shows `change @waishnav/devspace 1.0.8 => 1.0.8`); tag installs are NOT immune
 - a future upstream 1.0.9 release would let any of the above replace this fork with registry 1.0.9 (registry-takeover)
 
-Upgrades come ONLY from this repo's tags: `npm i -g git+https://github.com/avion23/devspace.git#<new-tag>`.
+Upgrades come ONLY from this repo's tags: `scripts/deploy.sh <new-tag>`.
 
 ## License
 

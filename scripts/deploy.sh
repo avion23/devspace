@@ -10,7 +10,15 @@ unit=devspace.service
 
 git ls-remote --exit-code --tags "$repo_url" "refs/tags/$tag" >/dev/null || { echo "tag $tag not on $repo_url" >&2; exit 1; }
 
-npm i -g --no-audit --no-fund "git+$repo_url.git#$tag"
+# Build from the tag and install the packed tarball. `npm i -g git+...#tag`
+# does not work: npm runs the tag's `prepare` build in global mode, so the
+# build's devDependencies are never installed.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+git clone -q --depth 1 --branch "$tag" "$repo_url.git" "$work/src"
+(cd "$work/src" && npm ci --ignore-scripts --no-audit --no-fund)
+tarball=$(cd "$work/src" && npm pack --silent --pack-destination "$work")
+npm i -g --no-audit --no-fund "$work/$tarball"
 pkg="$(npm root -g)/@waishnav/devspace"
 installed=$(sed -n 's/^export const FORK_REVISION = "\(.*\)";$/\1/p' "$pkg/dist/fork-revision.js")
 [[ "$tag" == *"-$installed" ]] || { echo "installed revision $installed does not match $tag" >&2; exit 1; }
