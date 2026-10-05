@@ -6,13 +6,16 @@ import type {
   WorkspaceStore,
 } from "./workspace-store.js";
 import { mkdir, opendir, readFile, realpath, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
+import { git, isInsideGitWorkTree } from "./git.js";
 import {
   AccessDeniedError,
   assertAllowedPath,
+  expandHomePath,
   isPathInsideRoot,
   resolveAllowedPath,
 } from "./roots.js";
@@ -293,6 +296,16 @@ export class WorkspaceRegistry {
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
+    const globalClaudePath = join(homedir(), ".claude", "CLAUDE.md");
+    if (resolve(workspace.root, expandHomePath(inputPath)) === globalClaudePath) {
+      const absolutePath = resolveAllowedPath(inputPath, workspace.root, [globalClaudePath], { followFinal: true });
+      // A file root's realpath must not authorize a different symlink target.
+      if (absolutePath !== globalClaudePath) {
+        throw new AccessDeniedError(`Path resolves outside authorized instruction file: ${inputPath}`);
+      }
+      return { absolutePath, readRoots: [workspace.root, globalClaudePath] };
+    }
+
     try {
       return {
         absolutePath: this.resolvePath(workspace, inputPath),
@@ -446,16 +459,31 @@ export class WorkspaceRegistry {
       if (realPath) loadedRealPaths.add(realPath);
     }
     const discovered: AvailableAgentsFile[] = [];
-
-    await walkWorkspace(root, async (path, entry) => {
-      if (!entry.isFile()) return;
-      if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
+    const consider = async (path: string): Promise<void> => {
       if (loadedPaths.has(path)) return;
       const realPath = await tryRealpath(path);
-      if (realPath && loadedRealPaths.has(realPath)) return;
+      if (!realPath) return;
+      if (loadedRealPaths.has(realPath)) return;
+      if (!(await stat(realPath)).isFile()) return;
 
       discovered.push({ path });
-    });
+    };
+
+    const insideGitWorkTree = await isInsideGitWorkTree(root);
+    if (insideGitWorkTree) {
+      // Inside a git work tree: ask git, which already knows .gitignore
+      // and treats nested repos/worktrees as opaque (never recursed
+      // into for untracked files). No walk, no fallback on git errors.
+      for (const relativePath of await listGitContextFiles(root)) {
+        await consider(resolve(root, relativePath));
+      }
+    } else {
+      await walkWorkspace(root, async (path, entry) => {
+        if (!entry.isFile()) return;
+        if (!CONTEXT_FILE_NAMES.has(entry.name)) return;
+        await consider(path);
+      });
+    }
 
     return discovered.sort((a, b) => a.path.localeCompare(b.path));
   }
@@ -555,6 +583,12 @@ async function tryRealpath(path: string): Promise<string | undefined> {
   }
 }
 
+async function listGitContextFiles(root: string): Promise<string[]> {
+  const patterns = [...CONTEXT_FILE_NAMES].map((name) => `:(glob)**/${name}`);
+  const { stdout } = await git(root, ["ls-files", "-co", "--exclude-standard", "-z", "--", ...patterns]);
+  return stdout.split("\0").filter((path) => path.length > 0);
+}
+
 async function walkWorkspace(
   directory: string,
   visit: (path: string, entry: { name: string; isFile(): boolean; isDirectory(): boolean }) => Promise<void> | void,
@@ -569,13 +603,28 @@ async function walkWorkspace(
   for await (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      if (!SKIPPED_CONTEXT_DIRS.has(entry.name)) {
-        await walkWorkspace(path, visit);
-      }
+      if (SKIPPED_CONTEXT_DIRS.has(entry.name)) continue;
+      if (await isNestedRepoRoot(path)) continue;
+      await walkWorkspace(path, visit);
       continue;
     }
 
     await visit(path, entry);
+  }
+}
+
+async function isNestedRepoRoot(directory: string): Promise<boolean> {
+  try {
+    // A `.git` entry (directory for a normal repo, file for a worktree)
+    // marks `directory` as the root of another project; never descend
+    // into it from a walk of an unrelated, non-git root.
+    await stat(join(directory, ".git"));
+    return true;
+  } catch (error) {
+    if (!isErrnoException(error) || error.code !== "ENOENT") {
+      throw error;
+    }
+    return false;
   }
 }
 
