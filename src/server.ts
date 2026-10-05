@@ -1787,8 +1787,7 @@ export function createServer(
   // identical doc as bare AS. Pure GET req.url rewrite before the SDK auth
   // router, so canonical metadataHandler serves both (identical body,
   // content-type, CORS, query passthrough). No auth/token/funnel change.
-  // Upgrade-clobber risk: npm upgrade overwrites dist/server.js; reapply
-  // via ~/.devspace/reapply-wellknown-aliases.sh. See router.js:96-99
+  // See router.js:96-99
   // (mcpAuthMetadataRouter serves only path-specific PRM + bare AS).
   app.use((req, _res, next) => {
     if (req.method !== "GET") return next();
