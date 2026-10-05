@@ -313,7 +313,7 @@ export class WorkspaceRegistry {
                 return;
             if (loadedRealPaths.has(realPath))
                 return;
-            if (!(await isRegularFile(realPath)))
+            if (!(await stat(realPath)).isFile())
                 return;
             discovered.push({ path });
         };
@@ -416,14 +416,6 @@ async function tryRealpath(path) {
     }
     catch {
         return undefined;
-    }
-}
-async function isRegularFile(path) {
-    try {
-        return (await stat(path)).isFile();
-    }
-    catch {
-        return false;
     }
 }
 async function listGitContextFiles(root) {

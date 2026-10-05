@@ -30,13 +30,12 @@ not a backup file on disk.
   removed vs failed.
 - `move` (`movePathTool`): root-validates `from`/`to`, refuses directories and
   any existing destination (including dangling symlinks), and is atomic via
-  `link(2)` + `unlink` (no lstat-then-rename race); falls back to checked
-  `rename` on `EXDEV`. Creates the destination's parent directories
-  recursively (like `write`) before linking, so a move into a new module
-  directory does not fail with a misleading ENOENT naming the source; the
-  `EXDEV` fallback's existence check is a caught-`lstatSync` boolean, not a
-  truthy-return predicate (`lstatSync` throws rather than returning falsy, so
-  the old check made that branch unreachable).
+  `link(2)` + `unlink` (no lstat-then-rename race). Creates the destination's
+  parent directories recursively (like `write`) before linking, so a move
+  into a new module directory does not fail with a misleading ENOENT naming
+  the source. A cross-filesystem move (`EXDEV`) is refused with a pointer to
+  `bash mv`; `rename(2)` cannot cross filesystems either, so there is no
+  fallback.
 - `repo_status` (`dist/server.js`): one read-only call returning `{branch,
   detached, head, upstream, ahead, behind, dirtyCount, dirtyPaths, branchLine,
   worktrees}` via `git -C <root>`, replacing repeated shell `git`
@@ -117,16 +116,21 @@ profile schema reject any other value.
 variants) outside the initially loaded set, to surface as "available nested
 instructions".
 
-- Inside a git work tree (`getGitEligibility(root).gitRoot` set), discovery
-  runs `git ls-files -co --exclude-standard` with a `:(glob)**/<name>`
-  pathspec per exact `CONTEXT_FILE_NAMES` entry, scoped to `root`. This
-  honors `.gitignore` and never recurses into a nested repo or worktree
-  (git already treats one as an opaque, untracked entry). A git error here
-  is not caught; it surfaces like any other git failure in this codebase.
-  No directory walk runs in this case.
+- `isInsideGitWorkTree` (`dist/git.js`, one `rev-parse --is-inside-work-tree`)
+  selects the strategy. Only git's "not a git repository" error, or `false`
+  (root inside `.git`), selects the walk; any other git failure (git
+  missing, timeout, dubious ownership) propagates. `getGitEligibility`
+  uses the same check.
+- Inside a git work tree, discovery runs `git ls-files -co --exclude-standard`
+  with a `:(glob)**/<name>` pathspec per exact `CONTEXT_FILE_NAMES` entry,
+  scoped to `root`. This honors `.gitignore` and never recurses into a
+  nested repo or worktree. Index entries that are not regular files on disk
+  (deleted tracked files, symlinks to directories) are dropped. A root that
+  is itself gitignored inside a parent repo discovers nothing. No directory
+  walk runs in this case.
 - Outside a git work tree, a directory walk (`walkWorkspace`) still runs,
   but now also skips any subdirectory that is itself a repository or
-  worktree root (contains a `.git` entry), on top of the existing
+  worktree root (contains a `.git` entry; only ENOENT means absent), on top of the existing
   `SKIPPED_CONTEXT_DIRS` name-based skips. A non-git root with large
   ignored trees (`node_modules`, build output, etc.) outside those skipped
   names is still walked in full; this is a partial mitigation, not a fix,
