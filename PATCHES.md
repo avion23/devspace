@@ -54,8 +54,11 @@ not a backup file on disk.
   server, closed when the response ends. ChatGPT opens one MCP session per
   tool call, so durable state is keyed by `workspaceId` and process
   `sessionId` only. `GET`/`DELETE /mcp` return 405.
-- Tool results carry the output text once, in `content`; `structuredContent`
-  holds only small typed metadata.
+- Every tool's `structuredContent` carries a `result` field (same text as
+  `content`, via `resultOutputSchema()`/`outputSchema`) alongside its other
+  typed metadata, so hosts that only read `structuredContent` (e.g. ChatGPT,
+  which does this whenever a tool declares an `outputSchema`) still get the
+  model-readable text.
 - `http_response_incomplete` is logged (request id, path, status, duration;
   no bodies or credentials) when a response closes before completion.
 - `trust proxy` defaults to one hop (`DEVSPACE_TRUST_PROXY=0` disables it).

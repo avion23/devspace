@@ -122,6 +122,14 @@ function formatAvailableAgentProvider(provider) {
     ].filter(Boolean).join(", ");
     return `${provider.id}${details ? ` (${details})` : ""}`;
 }
+function resultOutputSchema(extra = {}) {
+    return {
+        result: z
+            .string()
+            .describe("Model-readable result text for follow-up reasoning and plain MCP hosts."),
+        ...extra,
+    };
+}
 const workspaceSkillOutputSchema = z.object({
     name: z.string(),
     description: z.string(),
@@ -332,7 +340,7 @@ function processResult(snapshot) {
     return snapshot.output ? `${snapshot.output.replace(/\n$/, "")}\n${status}` : status;
 }
 function processOutputSchema() {
-    return {
+    return resultOutputSchema({
         sessionId: z.number().optional(),
         running: z.boolean(),
         exitCode: z.number().int().optional(),
@@ -341,7 +349,7 @@ function processOutputSchema() {
         timeoutSeconds: z.number().positive().optional(),
         wallTimeMs: z.number().nonnegative(),
         outputTruncated: z.boolean(),
-    };
+    });
 }
 function processToolResponse(tool, workspaceId, snapshot, summary) {
     const result = processResult(snapshot);
@@ -359,6 +367,7 @@ function processToolResponse(tool, workspaceId, snapshot, summary) {
             },
         },
         structuredContent: {
+            result,
             sessionId: snapshot.sessionId,
             running: snapshot.running,
             exitCode: snapshot.exitCode,
@@ -738,6 +747,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 .optional()
                 .describe("Maximum number of lines to read."),
         },
+        outputSchema: resultOutputSchema(),
         ...toolWidgetDescriptorMeta(config, "read"),
         annotations: { readOnlyHint: true },
     }, async ({ workspaceId, ...input }) => {
@@ -781,6 +791,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     payload: { content: response.content },
                 },
             },
+            structuredContent: {
+                result: contentText(response.content),
+            },
         };
     });
     if (config.toolMode !== "codex") {
@@ -796,12 +809,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("File path to write, relative to the workspace root."),
                 content: z.string().describe("Complete new file content."),
             },
-            outputSchema: {
+            outputSchema: resultOutputSchema({
                 additions: z.number(),
                 removals: z.number(),
                 lines: z.number(),
                 characters: z.number(),
-            },
+            }),
             ...toolWidgetDescriptorMeta(config, "write"),
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -848,7 +861,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         },
                     },
                 },
-                structuredContent: summary,
+                structuredContent: {
+                    result: contentText(response.content),
+                    ...summary,
+                },
             };
         });
         registerAppTool(server, toolNames.edit, {
@@ -870,12 +886,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 }))
                     .min(1),
             },
-            outputSchema: {
+            outputSchema: resultOutputSchema({
                 status: z.literal("applied"),
                 additions: z.number(),
                 removals: z.number(),
                 editCount: z.number(),
-            },
+            }),
             ...toolWidgetDescriptorMeta(config, "edit"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -924,6 +940,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 },
                 structuredContent: {
                     status: "applied",
+                    result: contentText(editContent),
                     additions: stats.additions,
                     removals: stats.removals,
                     editCount: input.edits.length,
@@ -942,6 +959,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .min(1)
                     .describe("Files to delete; all paths are validated before anything is removed."),
             },
+            outputSchema: resultOutputSchema(),
             _meta: {},
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -969,7 +987,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 success: true,
                 durationMs: Math.round(performance.now() - startedAt),
             });
-            return response;
+            return {
+                ...response,
+                structuredContent: {
+                    result: contentText(response.content),
+                },
+            };
         });
         registerAppTool(server, toolNames.move, {
             title: "Move file",
@@ -985,6 +1008,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe("Destination path, relative to the workspace root; must not already exist."),
             },
+            outputSchema: resultOutputSchema(),
             _meta: {},
             annotations: WRITE_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, ...input }) => {
@@ -1011,7 +1035,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 success: true,
                 durationMs: Math.round(performance.now() - startedAt),
             });
-            return response;
+            return {
+                ...response,
+                structuredContent: {
+                    result: contentText(response.content),
+                },
+            };
         });
         const REPO_STATUS_TOOL_ANNOTATIONS = {
             readOnlyHint: true,
@@ -1027,6 +1056,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe(workspaceIdDescription),
             },
+            outputSchema: resultOutputSchema(),
             _meta: {},
             annotations: REPO_STATUS_TOOL_ANNOTATIONS,
         }, async ({ workspaceId }) => {
@@ -1113,6 +1143,9 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                 });
                 return {
                     content: [{ type: "text", text: text }],
+                    structuredContent: {
+                        result: text,
+                    },
                 };
             }
             catch (error) {
@@ -1138,7 +1171,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe("Patch text enclosed by *** Begin Patch and *** End Patch markers."),
             },
-            outputSchema: {
+            outputSchema: resultOutputSchema({
                 additions: z.number(),
                 removals: z.number(),
                 files: z.array(z.object({
@@ -1146,7 +1179,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     previousPath: z.string().optional(),
                     operation: z.enum(["add", "update", "delete", "move"]),
                 })),
-            },
+            }),
             ...toolWidgetDescriptorMeta(config, "edit"),
             annotations: EDIT_TOOL_ANNOTATIONS,
         }, async ({ workspaceId, patch }) => {
@@ -1182,6 +1215,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     },
                 },
                 structuredContent: {
+                    result,
                     additions: applied.additions,
                     removals: applied.removals,
                     files: applied.files,
@@ -1198,10 +1232,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe(workspaceIdDescription),
             },
-            outputSchema: {
+            outputSchema: resultOutputSchema({
                 summary: reviewSummaryOutputSchema,
                 files: z.array(reviewFileOutputSchema),
-            },
+            }),
             ...toolWidgetDescriptorMeta(config, "show_changes"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId }) => {
@@ -1233,6 +1267,7 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     },
                 },
                 structuredContent: {
+                    result: contentText(content),
                     summary: review.summary,
                     files: review.files,
                 },
@@ -1254,12 +1289,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .describe("Optional path or glob scope relative to the workspace root."),
                 include: z.string().optional().describe("Optional include glob."),
             },
-            outputSchema: {
+            outputSchema: resultOutputSchema({
                 pattern: z.string(),
                 scope: z.string(),
                 lines: z.number(),
                 characters: z.number(),
-            },
+            }),
             ...toolWidgetDescriptorMeta(config, "search"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId, ...input }) => {
@@ -1302,7 +1337,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         payload: { content: response.content },
                     },
                 },
-                structuredContent: summary,
+                structuredContent: {
+                    result: contentText(response.content),
+                    ...summary,
+                },
             };
         });
         registerAppTool(server, toolNames.glob, {
@@ -1318,12 +1356,12 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .optional()
                     .describe("Optional path scope relative to the workspace root."),
             },
-            outputSchema: {
+            outputSchema: resultOutputSchema({
                 pattern: z.string(),
                 scope: z.string(),
                 lines: z.number(),
                 characters: z.number(),
-            },
+            }),
             ...toolWidgetDescriptorMeta(config, "search"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId, ...input }) => {
@@ -1366,7 +1404,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         payload: { content: response.content },
                     },
                 },
-                structuredContent: summary,
+                structuredContent: {
+                    result: contentText(response.content),
+                    ...summary,
+                },
             };
         });
         registerAppTool(server, toolNames.ls, {
@@ -1380,10 +1421,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                     .string()
                     .describe("Directory path to list, relative to the workspace root."),
             },
-            outputSchema: {
+            outputSchema: resultOutputSchema({
                 lines: z.number(),
                 characters: z.number(),
-            },
+            }),
             ...toolWidgetDescriptorMeta(config, "directory"),
             annotations: { readOnlyHint: true },
         }, async ({ workspaceId, ...input }) => {
@@ -1421,7 +1462,10 @@ export function createMcpServer(config, workspaces, reviewCheckpoints, processSe
                         payload: { content: response.content },
                     },
                 },
-                structuredContent: summary,
+                structuredContent: {
+                    result: contentText(response.content),
+                    ...summary,
+                },
             };
         });
     }
