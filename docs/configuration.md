@@ -115,9 +115,9 @@ sessions.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
+| `full` | Widget UI is attached to exposed workspace, file, edit, and shell tools. |
 | `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `off` | Default. Disables widget UI. |
 
 ## Skills
 
@@ -152,23 +152,13 @@ Enable providers and set their defaults in `~/.devspace/config.json`:
 {
   "subagents": {
     "enabled": true,
+    "sandboxFallback": "fail",
     "providers": [
       {
         "id": "codex",
         "enabled": true,
-        "model": "gpt-5.4",
-        "effort": "high"
-      },
-      {
-        "id": "claude",
-        "enabled": true,
-        "model": "sonnet"
-      },
-      {
-        "id": "grok",
-        "enabled": true,
-        "model": "grok-4.5",
-        "effort": "low"
+        "model": "gpt-5.6-luna",
+        "effort": "max"
       }
     ]
   }
@@ -181,19 +171,69 @@ profile value, which wins over the provider default. The legacy boolean
 `"subagents": true` remains readable and enables every provider, but new
 configuration should use the explicit object form.
 
+When Codex has no configured model or effort, DevSpace defaults to
+`gpt-5.6-luna` and `max`. `max` is passed to Codex app-server directly: it
+is a supported reasoning level for gpt-5.6 models (low, medium, high, xhigh,
+max). Models below gpt-5.6 and the Terra model are refused with guidance to
+use gpt-5.6 models such as `gpt-5.6-luna` with `max` thinking.
+
+### Codex sandbox mode
+
+Each provider may set `sandboxMode`. The default `auto` keeps the OS sandbox
+(bwrap) selected by the turn's write mode. Set `"full-access"` to run every
+turn for that provider without the OS sandbox layer:
+
+```json
+{
+  "subagents": {
+    "providers": [
+      { "id": "codex", "enabled": true, "sandboxMode": "full-access" }
+    ]
+  }
+}
+```
+
+`full-access` uses Codex's `danger-full-access` policy: no bwrap, no
+filesystem confinement. Use it only on hosts where the OS sandbox is broken
+or for trusted workloads; it is the operator's explicit choice, not an
+automatic fallback.
+
+### Codex sandbox fallback
+
+On Linux, Codex runs the probe command `unshare -Ur true` before a sandboxed
+turn. The asynchronous probe is `denied` only when the command exits 1 and
+stderr contains `Operation not permitted` or `EPERM`; every other exit,
+signal, timeout, missing executable, or spawn failure is `indeterminate` (and
+is rejected). Results are cached for 60 seconds and concurrent callers share
+one in-flight probe. A denied probe is not the same as an indeterminate probe:
+indeterminate results are always rejected and never authorize fallback.
+
+Keep `sandboxFallback` as `"fail"` (the default; legacy `false` is equivalent)
+to reject a denied OS sandbox, or set it to `"worktree-embedded"` for eligible
+write-access turns. Read-only turns are never eligible for the unsandboxed
+fallback. After changing host user namespaces or this setting, restart the
+agent daemon (`devspace agents daemon stop`, then the next agent command; or
+restart `devspace agents daemon`) rather than restarting only `devspace serve`.
+
+The fallback has no OS sandbox. Codex runs as the daemon account with
+unrestricted filesystem and network access. The worktree check authorizes only
+the starting directory; it does not confine execution. A rename race can also
+produce a TOCTOU gap between the check and provider execution. Use this mode
+for trusted workloads only.
+
+Restoring user namespaces (or the related sysctl) is not recovery from a
+compromised fallback run; treat credentials accessible to the daemon account as
+exposed.
+
+To roll back to r10, first remove `subagents.sandboxFallback` from
+`config.json`, then reinstall r10: r10's strict schema rejects that key.
+Migrations 7 and 8 are additive; keep the existing SQLite file.
+
 `devspace agents targets` shows usable providers and profiles for the current
 workspace. Add `--json` for a compact list of exact target names and their
 selection metadata. Disabled, unavailable, and unconfigured providers are
 omitted. Provider availability is runtime state and never rewrites the
 configuration.
-
-Grok Build is discovered from the `grok` executable. Authenticate it with
-`grok login` or `XAI_API_KEY`; DevSpace does not read or store Grok credentials.
-Grok supports `grok-build` by default and validates explicit model and effort
-values against the ACP session metadata when available. Set `GROK_COMMAND` when
-the executable is not on the normal PATH. If your Grok installation selects a
-custom agent profile, set `GROK_AGENT_PROFILE` to that profile's path; DevSpace
-passes it to `grok agent stdio` without writing to Grok's configuration.
 
 `open_workspace` returns a compact catalog containing profile names,
 descriptions, providers, and optional models/effort levels so the host model can choose an
@@ -235,7 +275,7 @@ npx @waishnav/devspace serve
 | `DEVSPACE_LOG_ASSETS` | `0` |
 | `DEVSPACE_LOG_TOOL_CALLS` | `1` |
 | `DEVSPACE_LOG_SHELL_COMMANDS` | `0` |
-| `DEVSPACE_TRUST_PROXY` | `0` |
+| `DEVSPACE_TRUST_PROXY` | `1` |
 
 Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 
@@ -251,7 +291,6 @@ DEVSPACE_PUBLIC_BASE_URL="https://devspace.example.com" \
 DEVSPACE_WORKTREE_ROOT="$HOME/.devspace/worktrees" \
 DEVSPACE_ARTIFACTS="1" \
 DEVSPACE_TOOL_MODE="minimal" \
-DEVSPACE_WIDGETS="full" \
 npx @waishnav/devspace serve
 ```
 

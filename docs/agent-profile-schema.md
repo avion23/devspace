@@ -26,7 +26,7 @@ schema: devspace-agent/v1
 name: reviewer
 description: Read-only reviewer for bugs, security risks, and missing tests.
 provider: codex
-model: gpt-5.4
+model: gpt-5.6-luna
 effort: high
 disabled: false
 ---
@@ -68,60 +68,41 @@ Required built-in provider id:
 
 ```yaml
 provider: codex
-provider: claude
-provider: opencode
-provider: pi
-provider: cursor
-provider: copilot
-provider: grok
 ```
 
 Unsupported or custom providers are rejected. DevSpace maps providers to their
 native integration:
 
 - `codex`: the host-installed `codex app-server` command
-- `claude`: Claude Code SDK
-- `opencode`: OpenCode SDK
-- `pi`: the installed Pi coding-agent SDK, one in-process session per DevSpace agent
-- `cursor`: ACP
-- `copilot`: ACP
-- `grok`: Grok Build ACP (`grok agent stdio`)
 
 Codex is resolved from the user's environment rather than bundled with
 DevSpace. Run `codex login` normally before using it; set `CODEX_COMMAND` when
-the executable is not on the normal PATH. OpenCode, Cursor, and Copilot
-runtimes are started and reused by the daemon internally, while Pi is embedded
-through its Node SDK.
+the executable is not on the normal PATH.
 
 ### `model`
 
 Optional provider model id or alias.
 
 ```yaml
-model: gpt-5.4
-model: sonnet
+model: gpt-5.6-luna
 ```
 
 ### `effort`
 
 Optional provider reasoning effort, thinking level, or model variant. If omitted,
-DevSpace lets the provider default apply. Values are provider-specific
-passthrough strings; DevSpace does not translate names between harnesses.
+DevSpace lets the provider default apply. Values are provider-specific strings;
+the Codex policy `max` is passed to app-server directly (gpt-5.6 models support
+low, medium, high, xhigh, max).
 
 ```yaml
 effort: low
 effort: high
-effort: xhigh
+effort: max
 ```
 
 DevSpace passes this through to providers that expose a matching control:
 
-- `claude`: SDK effort with adaptive thinking.
 - `codex`: app-server model reasoning effort.
-- `pi`: the AgentSession thinking-level control.
-- `opencode`: model variant.
-- `cursor` and `copilot`: ACP thought-level config when supported.
-- `grok`: `--reasoning-effort` on startup and xAI's ACP model metadata for resumed sessions.
 
 ### `disabled`
 
@@ -162,8 +143,8 @@ devspace agents show <id> --json
   "name": "reviewer",
   "description": "Read-only reviewer for bugs, security risks, and missing tests.",
   "provider": "codex",
-  "model": "gpt-5.4",
-  "effort": "high"
+  "model": "gpt-5.6-luna",
+  "effort": "max"
 }
 ```
 
@@ -181,11 +162,9 @@ profile.
 ## Runtime lifecycle
 
 DevSpace keeps provider sessions warm while they are active or recently used,
-but persists only the provider session id and durable agent metadata. Native
-sharing follows the provider boundary: Codex uses one app-server across agents,
-OpenCode uses one server across sessions, ACP providers use one process across
-sessions, while Claude and Pi keep one warm runtime per DevSpace agent. There is
-one active turn per agent; different agents may run concurrently.
+but persists only the provider session id and durable agent metadata. Codex
+shares one app-server across agents. There is one active turn per agent;
+different agents may run concurrently.
 
 If the daemon restarts during a turn, persisted `starting` and `running` agents
 become `error` with a restart message. The next `agents continue <id>` request can

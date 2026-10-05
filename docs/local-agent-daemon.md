@@ -30,7 +30,9 @@ Expected subagent failures cross the daemon boundary as structured error codes,
 not message-string conventions. Agent records in `error` state retain the safe
 message plus `errorCode` and `errorRetryable` fields so callers can distinguish
 provider cancellation, provider availability, workspace conflicts, daemon
-timeouts, and similar recovery categories after a background turn completes.
+timeouts, sandbox-unavailable failures, and similar recovery categories after a
+background turn completes. Sandbox failures use `SANDBOX_UNAVAILABLE`
+with `backend`, `stage`, `detail`, and `fallback_available` fields.
 Internal provider causes are kept out of the daemon payload and persisted JSON.
 
 The implementation treats `better-result` as the application-failure boundary,
@@ -54,7 +56,8 @@ cleanup problems:
 
 ```bash
 devspace agents daemon status
-devspace agents daemon stop
+devspace agents daemon stop                 # drain, then stop when idle
+devspace agents daemon stop --force         # stop immediately
 devspace agents daemon logs
 ```
 
@@ -66,7 +69,32 @@ provider session IDs, timestamps, and prior responses are not included in list
 or receipt output. Immediate failures are emitted as
 `{ error: { code, message, retryable, ... } }` with a non-zero exit code.
 Successful `daemon status` and `daemon stop` output the daemon status object,
-and successful `daemon logs` output is `{ "logs": "<text>" }`.
+and successful `daemon logs` output is `{ "logs": "<text>" }`. Successful Codex
+fallback runs include `{ "sandbox": "worktree-embedded", "warnings": [...] }`
+metadata in the agent observation.
+
+Sandbox fallback visibility is available without inspecting the provider:
+
+```bash
+devspace agents show <id> --json
+grep codex_sandbox_fallback ~/.local/share/devspace/agentd.log
+devspace agents daemon status
+```
+
+The JSON observation from `show` exposes `metadata.sandbox` and
+`metadata.warnings`. Once a session has used the unsandboxed fallback, the
+observation also retains `previouslyUnsandboxed: true` and `lastUnsandboxedAt`
+across later sandboxed turns and errors. Daemon status includes the daemon build `version`, the
+effective `sandboxFallback`, and `sandboxProbe` with `outcome` (`ok`, `denied`,
+`indeterminate`, or `unknown`) and its ISO timestamp. Plain-text `show` output
+does not print metadata generally; fallback warning lines are appended when
+warnings are present, along with the sticky exposure marker when it is set.
+
+The daemon build reports the package version plus the current fork revision
+(see `dist/fork-revision.js`), e.g. `1.0.8-r20`. An older daemon is not stopped
+automatically during a protocol upgrade: drain and stop it with its matching
+CLI, then retry the new command. A normal `daemon stop` is non-forceful; use
+`--force` only when immediate shutdown is intentional.
 
 Agent identity is explicit at the client boundary. `agents run` starts a new
 logical agent from a profile or provider; `agents continue <id>` continues an
