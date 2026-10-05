@@ -25,11 +25,14 @@ write tools remain workspace-confined. The file is not automatically loaded.
 Workspace instructions name the execution and file-write tools.
 This does not override ChatGPT's connector-side tool selection.
 
-## Upgrade to a new tag
+## Release, upgrade, revert
 
 ```
-npm i -g https://github.com/avion23/devspace/archive/refs/tags/<new-tag>.tar.gz
+scripts/release.sh rN        # test, tag, push, deploy a new revision from main
+scripts/deploy.sh <tag>      # install a tag and restart; the previous tag reverts
 ```
+
+See [`PATCHES.md`](PATCHES.md#releases-scripts).
 
 ## WARNING
 

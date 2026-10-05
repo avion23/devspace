@@ -106,8 +106,20 @@ profile schema reject any other value.
 - One Codex app-server runs per `(executable, CODEX_HOME)` and is shared
   across agents (`CodexLocalAgentDriver.runtimeKey` ignores agent identity).
 
-## Current fork revision
+## Releases (`scripts/`)
 
-`dist/fork-revision.js` holds the revision tag reported by the daemon
-(`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r19`) and installed by
-`README.md`'s install command. Bump both together when cutting a release.
+- `dist/fork-revision.js` holds the revision reported by the daemon
+  (`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r19`).
+- `scripts/release.sh rN` cuts a release from a clean `main` equal to
+  `origin/main`: bumps the revision in `dist/fork-revision.js`, `README.md`,
+  `PATCHES.md` and `docs/local-agent-daemon.md`, runs `npm ci`, `npm test`
+  and `scripts/smoke.mjs` against a packed install, commits, tags
+  `v<version>-rN`, pushes, and runs `scripts/deploy.sh`.
+- `scripts/deploy.sh <tag>` installs a tag globally, restarts
+  `devspace.service`, and checks local and public `/healthz` and `GET /mcp`
+  (405). Revert: run it with the previous tag.
+- `scripts/smoke.mjs [package-dir]` starts `serve` on a free port with a
+  temporary HOME and checks OAuth, the stateless transport, the 30 s yield,
+  bounded output with the full log kept, and the shutdown drain.
+- CI (`.github/workflows/test.yml`) runs `npm test` and `scripts/smoke.mjs`
+  on every push to `main` and on pull requests.
