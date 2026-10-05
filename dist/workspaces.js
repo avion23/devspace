@@ -428,8 +428,10 @@ async function walkWorkspace(directory, visit) {
     try {
         entries = await opendir(directory);
     }
-    catch {
-        return;
+    catch (error) {
+        if (isUninspectableError(error))
+            return;
+        throw error;
     }
     for await (const entry of entries) {
         const path = join(directory, entry.name);
@@ -453,11 +455,29 @@ async function isNestedRepoRoot(directory) {
         return true;
     }
     catch (error) {
-        if (!isErrnoException(error) || error.code !== "ENOENT") {
+        if (!isErrnoException(error)) {
             throw error;
         }
-        return false;
+        if (error.code === "ENOENT") {
+            return false;
+        }
+        if (isUninspectableError(error)) {
+            // Cannot even inspect this entry (e.g. a directory owned by
+            // another user, like /tmp/systemd-private-*); the subsequent
+            // opendir would fail the same way, so skip it the same way
+            // opendir's own isUninspectableError check does, instead of
+            // crashing the whole walk.
+            return true;
+        }
+        throw error;
     }
+}
+// Explicit "cannot inspect this entry" conditions for the non-git walk: no
+// permission to traverse into or read the directory. Anything else (disk
+// errors, ENOTDIR from a genuinely corrupt tree, ...) is a real error and
+// must propagate instead of being silently skipped.
+function isUninspectableError(error) {
+    return isErrnoException(error) && (error.code === "EACCES" || error.code === "EPERM");
 }
 function isErrnoException(error) {
     return error instanceof Error && "code" in error;
