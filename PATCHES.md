@@ -106,6 +106,27 @@ profile schema reject any other value.
 - One Codex app-server runs per `(executable, CODEX_HOME)` and is shared
   across agents (`CodexLocalAgentDriver.runtimeKey` ignores agent identity).
 
+## Nested instruction file discovery (`dist/workspaces.js`)
+
+`findAvailableAgentsFiles` finds `AGENTS.md`/`CLAUDE.md` (and upper-case
+variants) outside the initially loaded set, to surface as "available nested
+instructions".
+
+- Inside a git work tree (`getGitEligibility(root).gitRoot` set), discovery
+  runs `git ls-files -co --exclude-standard` with a `:(glob)**/<name>`
+  pathspec per exact `CONTEXT_FILE_NAMES` entry, scoped to `root`. This
+  honors `.gitignore` and never recurses into a nested repo or worktree
+  (git already treats one as an opaque, untracked entry). A git error here
+  is not caught; it surfaces like any other git failure in this codebase.
+  No directory walk runs in this case.
+- Outside a git work tree, a directory walk (`walkWorkspace`) still runs,
+  but now also skips any subdirectory that is itself a repository or
+  worktree root (contains a `.git` entry), on top of the existing
+  `SKIPPED_CONTEXT_DIRS` name-based skips. A non-git root with large
+  ignored trees (`node_modules`, build output, etc.) outside those skipped
+  names is still walked in full; this is a partial mitigation, not a fix,
+  for that case.
+
 ## Releases (`scripts/`)
 
 - `dist/fork-revision.js` holds the revision reported by the daemon
