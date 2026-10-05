@@ -33,11 +33,35 @@ export async function git(cwd, args, options = {}) {
         throw error;
     }
 }
-export async function getGitEligibility(cwd) {
+// Git's own wording for "no repository here"; the only outcome of
+// `rev-parse --is-inside-work-tree` that should be treated as "not git"
+// rather than propagated. Every other failure (git missing from PATH, a
+// timeout, dubious ownership, a corrupt config, ...) is a real error and
+// must not be silently treated the same as a plain non-repository directory.
+const NOT_A_GIT_REPOSITORY_MESSAGE = "fatal: not a git repository";
+function isNotAGitRepositoryError(error) {
+    return (Boolean(error) &&
+        typeof error === "object" &&
+        typeof error.stderr === "string" &&
+        error.stderr.includes(NOT_A_GIT_REPOSITORY_MESSAGE));
+}
+// Single git spawn: is `cwd` inside a usable git work tree? Returns false
+// both when there is no repository at all and when `cwd` is inside a
+// repository's `.git` directory itself (which `--is-inside-work-tree`
+// reports as "false" rather than failing). Any other git failure propagates.
+export async function isInsideGitWorkTree(cwd) {
     try {
-        await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+        const { stdout } = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+        return stdout.trim() === "true";
     }
-    catch {
+    catch (error) {
+        if (isNotAGitRepositoryError(error))
+            return false;
+        throw error;
+    }
+}
+export async function getGitEligibility(cwd) {
+    if (!(await isInsideGitWorkTree(cwd))) {
         return {
             ok: false,
             reason: "not_git",
