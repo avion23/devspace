@@ -13,8 +13,7 @@ not a backup file on disk.
   lexical and realpathed root. This blocks intermediate-symlink escapes
   (`workspace/evil -> /etc`) for every tool, not only destructive ones.
 - Read, write, and edit follow the final path segment's symlink only after
-  containment is validated (`followFinal`); `delete` and `move` use leaf
-  semantics (`lstat`/`link(2)`) and operate on the link itself.
+  containment is validated (`followFinal`).
 - `read` additionally permits the exact file `~/.claude/CLAUDE.md` (operator's
   global Claude instructions) in every tool mode, with no directory, sibling,
   or symlink-redirected access, and no write access.
@@ -24,27 +23,6 @@ not a backup file on disk.
 
 ## File tools (`dist/pi-tools.js`, registered from `dist/server.js`)
 
-- `delete` (`deletePathsTool`): validates every path against the workspace
-  root, refuses directories (points the caller at `bash rm -r`), refuses
-  symlink targets it shouldn't follow, and reports exactly which paths were
-  removed vs failed.
-- `move` (`movePathTool`): root-validates `from`/`to`, refuses directories and
-  any existing destination (including dangling symlinks), and is atomic via
-  `link(2)` + `unlink` (no lstat-then-rename race). Creates the destination's
-  parent directories recursively (like `write`) before linking, so a move
-  into a new module directory does not fail with a misleading ENOENT naming
-  the source. A cross-filesystem move (`EXDEV`) is refused with a pointer to
-  `bash mv`; `rename(2)` cannot cross filesystems either, so there is no
-  fallback.
-- `repo_status` (`dist/server.js`): one read-only call returning `{branch,
-  detached, head, upstream, ahead, behind, dirtyCount, dirtyPaths, branchLine,
-  worktrees}` via `git -C <root>`, replacing repeated shell `git`
-  reconstruction. Runs with `--no-optional-locks`, fsmonitor disabled, and
-  `LC_ALL=C`; caps `worktrees` at 50. The unborn-`HEAD` and no-upstream cases
-  are each identified by git's specific exit code/stderr for that exact
-  condition; any other git failure (timeout, missing binary, permission
-  error, corrupted repo) propagates as a tool error instead of silently
-  defaulting.
 - `bash` (`dist/server.js`, timeout constants from `dist/pi-tools.js`):
   default timeout 300s when the caller omits one, max 900s.
   `exec_command`/`write_stdin` are available in every tool mode for
