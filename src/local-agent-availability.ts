@@ -25,18 +25,6 @@ export function checkLocalAgentProviderAvailability(
   switch (provider) {
     case "codex":
       return codexAvailability(env);
-    case "claude":
-      return packageAvailability(provider, "@anthropic-ai/claude-agent-sdk");
-    case "opencode":
-      return packageAvailability(provider, "@opencode-ai/sdk/v2");
-    case "pi":
-      return packageAvailability(provider, "@earendil-works/pi-coding-agent");
-    case "cursor":
-      return commandAvailability(provider, env.CURSOR_COMMAND ?? "cursor-agent", env);
-    case "copilot":
-      return commandAvailability(provider, env.COPILOT_COMMAND ?? "copilot", env);
-    case "grok":
-      return commandAvailability(provider, env.GROK_COMMAND ?? "grok", env);
   }
 }
 
@@ -64,22 +52,6 @@ export function formatLocalAgentProviderAvailabilitySummary(
     available.length > 0 ? `available: ${available.join(", ")}` : undefined,
     unavailable.length > 0 ? `unavailable: ${unavailable.join(", ")}` : undefined,
   ].filter(Boolean).join("; ");
-}
-
-function packageAvailability(
-  provider: LocalAgentProvider,
-  packageName: string,
-): LocalAgentProviderAvailability {
-  try {
-    import.meta.resolve(packageName);
-    return { name: provider, available: true };
-  } catch {
-    return {
-      name: provider,
-      available: false,
-      reason: `${packageName} package not found`,
-    };
-  }
 }
 
 function codexAvailability(env: NodeJS.ProcessEnv): LocalAgentProviderAvailability {

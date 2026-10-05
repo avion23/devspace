@@ -20,6 +20,13 @@ export interface LocalAgentRecord {
   error?: string;
   errorCode?: string;
   errorRetryable?: boolean;
+  metadata?: Record<string, unknown>;
+  errorBackend?: string;
+  errorStage?: string;
+  errorDetail?: string;
+  errorFallbackAvailable?: boolean;
+  previouslyUnsandboxed?: boolean;
+  lastUnsandboxedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -57,6 +64,13 @@ interface LocalAgentRow {
   error: string | null;
   error_code: string | null;
   error_retryable: string | null;
+  metadata_json: string | null;
+  error_backend: string | null;
+  error_stage: string | null;
+  error_detail: string | null;
+  error_fallback_available: string | null;
+  previously_unsandboxed: string | null;
+  last_unsandboxed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -205,6 +219,13 @@ export class LocalAgentStore {
           error = ?,
           error_code = ?,
           error_retryable = ?,
+          metadata_json = ?,
+          error_backend = ?,
+          error_stage = ?,
+          error_detail = ?,
+          error_fallback_available = ?,
+          previously_unsandboxed = ?,
+          last_unsandboxed_at = ?,
           updated_at = ?
          where id = ?`,
       )
@@ -221,6 +242,13 @@ export class LocalAgentStore {
         updated.error ?? null,
         updated.errorCode ?? null,
         updated.errorRetryable === undefined ? null : String(updated.errorRetryable),
+        updated.metadata === undefined ? null : JSON.stringify(updated.metadata),
+        updated.errorBackend ?? null,
+        updated.errorStage ?? null,
+        updated.errorDetail ?? null,
+        updated.errorFallbackAvailable === undefined ? null : String(updated.errorFallbackAvailable),
+        updated.previouslyUnsandboxed === undefined ? null : String(updated.previouslyUnsandboxed),
+        updated.lastUnsandboxedAt ?? null,
         updated.updatedAt,
         updated.id,
       );
@@ -278,6 +306,13 @@ function rowToLocalAgentRecord(row: LocalAgentRow): LocalAgentRecord {
     error: row.error ?? undefined,
     errorCode: row.error_code ?? undefined,
     errorRetryable: readOptionalBoolean(row.error_retryable),
+    metadata: readMetadata(row.metadata_json),
+    errorBackend: row.error_backend ?? undefined,
+    errorStage: row.error_stage ?? undefined,
+    errorDetail: row.error_detail ?? undefined,
+    errorFallbackAvailable: readOptionalBoolean(row.error_fallback_available),
+    previouslyUnsandboxed: readOptionalBoolean(row.previously_unsandboxed),
+    lastUnsandboxedAt: row.last_unsandboxed_at ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -287,6 +322,16 @@ function readOptionalBoolean(value: string | null): boolean | undefined {
   if (value === "true") return true;
   if (value === "false") return false;
   return undefined;
+}
+
+function readMetadata(value: string | null): Record<string, unknown> | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function storeResult<T>(operation: string, run: () => T): BetterResult<T, AgentStoreError> {
