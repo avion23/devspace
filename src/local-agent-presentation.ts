@@ -36,13 +36,22 @@ export interface AgentFailureOutput {
   code: string;
   message: string;
   retryable: boolean;
+  backend?: string;
+  stage?: string;
+  detail?: string;
+  fallback_available?: boolean;
+}
+
+export interface AgentExposureOutput {
+  previouslyUnsandboxed: true;
+  lastUnsandboxedAt?: string;
 }
 
 export type AgentObservationOutput =
-  | { id: string; status: "running" }
-  | { id: string; status: "completed"; response?: string }
-  | { id: string; status: "failed"; error: AgentFailureOutput }
-  | { id: string; status: "stopped"; error?: AgentFailureOutput };
+  | ({ id: string; status: "running"; metadata?: Record<string, unknown> } & Partial<AgentExposureOutput>)
+  | ({ id: string; status: "completed"; response?: string; metadata?: Record<string, unknown> } & Partial<AgentExposureOutput>)
+  | ({ id: string; status: "failed"; error: AgentFailureOutput; metadata?: Record<string, unknown> } & Partial<AgentExposureOutput>)
+  | ({ id: string; status: "stopped"; error?: AgentFailureOutput; metadata?: Record<string, unknown> } & Partial<AgentExposureOutput>);
 
 export function presentAgentTargetCatalog(catalog: LocalAgentCatalog): AgentTargetCatalogOutput {
   return {
@@ -82,18 +91,27 @@ export function presentAgentObservation(record: LocalAgentRecord): AgentObservat
       return {
         ...receipt,
         status: "completed",
+        ...presentAgentExposure(record),
         ...(record.latestResponse === undefined ? {} : { response: record.latestResponse }),
+        ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
       };
     case "failed":
-      return { ...receipt, status: "failed", error: presentAgentFailure(record) };
+      return { ...receipt, status: "failed", ...presentAgentExposure(record), error: presentAgentFailure(record), ...(record.metadata === undefined ? {} : { metadata: record.metadata }) };
     case "stopped":
       return {
         ...receipt,
         status: "stopped",
+        ...presentAgentExposure(record),
         ...(hasAgentFailure(record) ? { error: presentAgentFailure(record) } : {}),
+        ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
       };
     case "running":
-      return { id: receipt.id, status: "running" };
+      return {
+        id: receipt.id,
+        status: "running",
+        ...presentAgentExposure(record),
+        ...(record.metadata === undefined ? {} : { metadata: record.metadata }),
+      };
   }
 }
 
@@ -121,14 +139,15 @@ export function formatAgentSummary(summary: AgentSummaryOutput): string {
 
 export function formatAgentObservation(observation: AgentObservationOutput): string {
   const line = formatAgentReceipt(observation);
+  const notices = [formatAgentWarnings(observation.metadata), formatAgentExposure(observation)].filter(Boolean).join("\n");
   if (observation.status === "completed" && observation.response !== undefined) {
-    return `${line}\n\n${observation.response}`;
+    return `${line}\n\n${observation.response}${notices ? `\n\n${notices}` : ""}`;
   }
   if ((observation.status === "failed" || observation.status === "stopped") && observation.error) {
     const retryable = observation.error.retryable ? " [retryable]" : "";
-    return `${line} ${observation.error.code}: ${observation.error.message}${retryable}`;
+    return `${line} ${observation.error.code}: ${observation.error.message}${retryable}${notices ? `\n${notices}` : ""}`;
   }
-  return line;
+  return notices ? `${line}\n${notices}` : line;
 }
 
 function presentAgentStatus(status: LocalAgentStatus): AgentCommandStatus {
@@ -154,5 +173,29 @@ function presentAgentFailure(record: LocalAgentRecord): AgentFailureOutput {
     code: record.errorCode ?? "AGENT_FAILED",
     message: record.error ?? "Subagent failed without an error message.",
     retryable: record.errorRetryable ?? false,
+    ...(record.errorBackend === undefined ? {} : { backend: record.errorBackend }),
+    ...(record.errorStage === undefined ? {} : { stage: record.errorStage }),
+    ...(record.errorDetail === undefined ? {} : { detail: record.errorDetail }),
+    ...(record.errorFallbackAvailable === undefined ? {} : { fallback_available: record.errorFallbackAvailable }),
   };
+}
+
+function formatAgentWarnings(metadata: Record<string, unknown> | undefined): string {
+  const warnings = Array.isArray(metadata?.warnings)
+    ? metadata.warnings.filter((warning): warning is string => typeof warning === "string" && warning.length > 0)
+    : [];
+  return warnings.map((warning) => `Warning: ${warning}`).join("\n");
+}
+
+function presentAgentExposure(record: LocalAgentRecord): Partial<AgentExposureOutput> {
+  if (record.previouslyUnsandboxed !== true) return {};
+  return {
+    previouslyUnsandboxed: true,
+    ...(record.lastUnsandboxedAt === undefined ? {} : { lastUnsandboxedAt: record.lastUnsandboxedAt }),
+  };
+}
+
+function formatAgentExposure(observation: Partial<AgentExposureOutput>): string {
+  if (observation.previouslyUnsandboxed !== true) return "";
+  return `Warning: previouslyUnsandboxed=true; lastUnsandboxedAt=${observation.lastUnsandboxedAt ?? "unknown"}.`;
 }
