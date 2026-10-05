@@ -7,7 +7,7 @@ import type {
   RunOverrides,
   StartLocalAgentInput,
 } from "./local-agent-manager.js";
-import type { LocalAgentWriteMode } from "./local-agent-runtime.js";
+import type { LocalAgentWriteMode } from "./local-agent-runtime-pool.js";
 import { LOCAL_AGENT_DAEMON_PROTOCOL_VERSION } from "./local-agent-daemon-lifecycle.js";
 
 export type LocalAgentDaemonMethod =
@@ -27,7 +27,7 @@ export type LocalAgentDaemonRequest =
   | AgentDaemonRequestBase<"agent.get", { id: string; scope: LocalAgentWorkspaceScope }>
   | AgentDaemonRequestBase<"agent.list", LocalAgentWorkspaceScope>
   | AgentDaemonRequestBase<"daemon.status", Record<string, never>>
-  | AgentDaemonRequestBase<"daemon.stop", Record<string, never>>
+  | AgentDaemonRequestBase<"daemon.stop", { force: boolean }>
   | AgentDaemonRequestBase<"daemon.logs", { lines?: number }>;
 
 interface AgentDaemonRequestBase<
@@ -41,7 +41,15 @@ interface AgentDaemonRequestBase<
   params: P;
 }
 
+export type LocalAgentDaemonSandboxFallback = "fail" | "worktree-embedded";
+
+export interface LocalAgentSandboxProbeState {
+  outcome: "ok" | "denied" | "indeterminate" | "unknown";
+  at: string;
+}
+
 export interface LocalAgentDaemonStatus {
+  version: string;
   state: "ready" | "stopping";
   protocolVersion: number;
   pid: number;
@@ -50,17 +58,24 @@ export interface LocalAgentDaemonStatus {
   activeTurns: number;
   runtimeCount: number;
   clientConnections: number;
+  sandboxFallback: LocalAgentDaemonSandboxFallback;
+  sandboxProbe: LocalAgentSandboxProbeState;
 }
 
 export interface LocalAgentDaemonErrorPayload {
   code: string;
   message: string;
   retryable?: boolean;
+  backend?: string;
+  stage?: string;
+  detail?: string;
+  fallback_available?: boolean;
   provider?: string;
   agentId?: string;
   workspaceId?: string;
   operation?: string;
   target?: string;
+  activeTurns?: number;
 }
 
 export type LocalAgentDaemonResponse =
@@ -96,8 +111,9 @@ export function decodeLocalAgentDaemonRequest(value: unknown): LocalAgentDaemonR
   switch (method) {
     case "hello":
     case "daemon.status":
-    case "daemon.stop":
       return { requestId, protocolVersion, authToken, method, params: decodeEmptyParams(params) } as LocalAgentDaemonRequest;
+    case "daemon.stop":
+      return { requestId, protocolVersion, authToken, method, params: decodeStopParams(params) } as LocalAgentDaemonRequest;
     case "agent.start":
       return {
         requestId,
@@ -163,11 +179,16 @@ export function decodeLocalAgentDaemonResponse(value: unknown): LocalAgentDaemon
         code: requiredString(error?.code, "error.code"),
         message: requiredString(error?.message, "error.message"),
         retryable: optionalBoolean(error?.retryable),
+        backend: optionalString(error?.backend),
+        stage: optionalString(error?.stage),
+        detail: optionalString(error?.detail),
+        fallback_available: optionalBoolean(error?.fallback_available),
         provider: optionalString(error?.provider),
         agentId: optionalString(error?.agentId),
         workspaceId: optionalString(error?.workspaceId),
         operation: optionalString(error?.operation),
         target: optionalString(error?.target),
+        activeTurns: optionalInteger(error?.activeTurns),
       },
     };
   }
@@ -192,6 +213,13 @@ export function decodeAgentRecord(value: unknown): LocalAgentRecord {
     error: optionalContentString(record?.error),
     errorCode: optionalString(record?.errorCode),
     errorRetryable: optionalBoolean(record?.errorRetryable),
+    metadata: optionalMetadata(record?.metadata),
+    errorBackend: optionalString(record?.errorBackend),
+    errorStage: optionalString(record?.errorStage),
+    errorDetail: optionalString(record?.errorDetail),
+    errorFallbackAvailable: optionalBoolean(record?.errorFallbackAvailable),
+    previouslyUnsandboxed: optionalBoolean(record?.previouslyUnsandboxed),
+    lastUnsandboxedAt: optionalString(record?.lastUnsandboxedAt),
     createdAt: requiredString(record?.createdAt, "createdAt"),
     updatedAt: requiredString(record?.updatedAt, "updatedAt"),
   };
@@ -209,6 +237,7 @@ export function decodeDaemonStatus(value: unknown): LocalAgentDaemonStatus {
     throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid status.");
   }
   return {
+    version: optionalString(record?.version) ?? "unknown",
     state,
     protocolVersion: requiredInteger(record?.protocolVersion, "protocolVersion"),
     pid: requiredInteger(record?.pid, "pid"),
@@ -217,6 +246,8 @@ export function decodeDaemonStatus(value: unknown): LocalAgentDaemonStatus {
     activeTurns: requiredInteger(record?.activeTurns, "activeTurns"),
     runtimeCount: requiredInteger(record?.runtimeCount, "runtimeCount"),
     clientConnections: requiredInteger(record?.clientConnections, "clientConnections"),
+    sandboxFallback: decodeSandboxFallback(record?.sandboxFallback),
+    sandboxProbe: decodeSandboxProbeState(record?.sandboxProbe, record?.startedAt),
   };
 }
 
@@ -239,6 +270,17 @@ function decodeEmptyParams(value: unknown): Record<string, never> {
     throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "This daemon method does not accept parameters.");
   }
   return {};
+}
+
+function decodeStopParams(value: unknown): { force: boolean } {
+  if (value === undefined) return { force: true };
+  const record = asRecord(value);
+  if (!record) throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Daemon stop options must be an object.");
+  const keys = Object.keys(record);
+  if (keys.some((key) => key !== "force") || (record.force !== undefined && typeof record.force !== "boolean")) {
+    throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Daemon stop force must be a boolean.");
+  }
+  return { force: record.force !== false };
 }
 
 function decodeStartInput(value: unknown): StartLocalAgentInput {
@@ -336,6 +378,34 @@ function optionalContentString(value: unknown): string | undefined {
 
 function optionalBoolean(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function optionalInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function optionalMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function decodeSandboxFallback(value: unknown): LocalAgentDaemonSandboxFallback {
+  if (value === undefined) return "fail";
+  if (value === "fail" || value === "worktree-embedded") return value;
+  throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid sandbox fallback.");
+}
+
+function decodeSandboxProbeState(value: unknown, fallbackAt: unknown): LocalAgentSandboxProbeState {
+  if (value === undefined) return { outcome: "unknown", at: requiredString(fallbackAt, "startedAt") };
+  const record = asRecord(value);
+  const outcome = record?.outcome;
+  if (outcome !== "ok" && outcome !== "denied" && outcome !== "indeterminate" && outcome !== "unknown") {
+    throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid sandbox probe state.");
+  }
+  return {
+    outcome,
+    at: requiredString(record?.at, "sandboxProbe.at"),
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
