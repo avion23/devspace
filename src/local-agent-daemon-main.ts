@@ -13,6 +13,7 @@ import { LocalAgentManager } from "./local-agent-manager.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
 import { FORK_REVISION } from "./fork-revision.js";
+import { createWorkspaceStore } from "./workspace-store.js";
 
 const config = loadConfig();
 const daemonBuildVersion = `${readPackageVersion()}-${FORK_REVISION}`;
@@ -24,6 +25,7 @@ const log = (
   fields: Record<string, unknown>,
 ) => writeLocalAgentDaemonLog(paths, level, event, fields);
 const store = new LocalAgentStore(paths.stateDir);
+const workspaceStore = createWorkspaceStore(config.stateDir);
 const drivers = createLocalAgentDrivers({
   sandboxFallback: config.subagents.sandboxFallback,
   worktreeRoot: config.worktreeRoot,
@@ -37,6 +39,7 @@ const manager = new LocalAgentManager({
   loadProfiles: (workspaceRoot) => loadLocalAgentProfiles(config, workspaceRoot, { includeDisabled: true }),
   agentDir: config.agentDir,
   allowedRoots: config.allowedRoots,
+  durableWorkspaceContext: { workspaceStore, worktreeRoot: config.worktreeRoot },
   logger: log,
   subagents: config.subagents,
 });
@@ -47,7 +50,10 @@ const daemon = new LocalAgentDaemon({
     const reconciled = manager.reconcileActiveRuns();
     if (reconciled.isErr()) throw reconciled.error;
   },
-  onClosed: () => { if (!shuttingDown) process.exit(0); },
+  onClosed: () => {
+    workspaceStore.close?.();
+    if (!shuttingDown) process.exit(0);
+  },
   idleShutdownMs: parseIdleShutdownMs(process.env.DEVSPACE_AGENTD_IDLE_TIMEOUT_MS),
   buildVersion: daemonBuildVersion,
   sandboxFallback: config.subagents.sandboxFallback,
@@ -78,10 +84,12 @@ try {
 } catch (error) {
   if (error instanceof LocalAgentDaemonAlreadyRunningError) {
     await manager.close();
+    workspaceStore.close?.();
     process.exit(0);
   }
   log("error", "daemon_start_failed", { error: error instanceof Error ? error.message : String(error) });
   await manager.close();
+  workspaceStore.close?.();
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }

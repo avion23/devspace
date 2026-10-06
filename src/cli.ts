@@ -6,8 +6,9 @@ import type { Result as BetterResult } from "better-result";
 import * as prompts from "@clack/prompts";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
-import { loadConfig } from "./config.js";
+import { loadConfig, type ServerConfig } from "./config.js";
 import { resolveCliWorkspaceContext } from "./cli-workspace.js";
+import { createWorkspaceStore } from "./workspace-store.js";
 import { resolveSubagentsConfig } from "./local-agent-config.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
@@ -50,7 +51,7 @@ import {
   writeDevspaceConfig,
   type DevspaceUserConfig,
 } from "./user-config.js";
-import { expandHomePath } from "./roots.js";
+import { AccessDeniedError, expandHomePath } from "./roots.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 // pi-tools.js is a leaf (imports roots.js + pi-coding-agent only): no cycle.
 // Imported here so the production serve() path can log the effective bash
@@ -445,10 +446,27 @@ async function runAgentsCommand(args: string[]): Promise<void> {
   }
 }
 
+function resolveAgentsWorkspaceContext(config: ServerConfig) {
+  try {
+    return resolveCliWorkspaceContext(config.allowedRoots);
+  } catch (cause) {
+    if (!(cause instanceof AccessDeniedError)) throw cause;
+  }
+  const workspaceStore = createWorkspaceStore(config.stateDir);
+  try {
+    return resolveCliWorkspaceContext(config.allowedRoots, process.env, process.cwd(), {
+      worktreeRoot: config.worktreeRoot,
+      workspaceStore,
+    });
+  } finally {
+    workspaceStore.close?.();
+  }
+}
+
 async function runAgentsTargets(args: string[], json: boolean): Promise<void> {
   if (args.length > 0) throw new Error("Usage: devspace agents targets [--json]");
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = resolveAgentsWorkspaceContext(config);
   const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
   const providers = buildLocalAgentProviderStatuses(
     config.subagents,
@@ -464,7 +482,7 @@ async function runAgentsList(args: string[], json: boolean): Promise<void> {
   if (args.length > 0) throw new Error("Usage: devspace agents ls [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const result = await client.list(resolveCliWorkspaceContext(config.allowedRoots));
+  const result = await client.list(resolveAgentsWorkspaceContext(config));
   const agents = presentAgentResult(result, json);
   if (!agents) return;
 
@@ -487,7 +505,7 @@ async function runAgentsList(args: string[], json: boolean): Promise<void> {
 async function runAgentsRun(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentRunArgs(args);
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = resolveAgentsWorkspaceContext(config);
   const client = createLocalAgentClient(config);
   const result = await client.start({
     target: parsed.target,
@@ -511,7 +529,7 @@ async function runAgentsContinue(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentContinueArgs(args);
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = resolveAgentsWorkspaceContext(config);
   const result = await client.continue(parsed.agentId, parsed.prompt, {
     model: parsed.model,
     effort: parsed.effort,
@@ -532,7 +550,7 @@ async function runAgentsShow(args: string[], json: boolean): Promise<void> {
 
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = resolveAgentsWorkspaceContext(config);
   const initial = await client.get(id, scope);
   let record = presentAgentResult(initial, json);
   if (!record) return;

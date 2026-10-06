@@ -34,7 +34,10 @@ import {
   type LocalAgentWriteMode,
 } from "./local-agent-runtime-pool.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
-import { assertAllowedPath } from "./roots.js";
+import {
+  assertLocalAgentWorkspaceAllowed,
+  type DurableAgentWorkspaceContext,
+} from "./cli-workspace.js";
 import {
   isSubagentProviderEnabled,
   type SubagentsConfig,
@@ -67,6 +70,7 @@ export interface LocalAgentManagerOptions {
   loadProfiles: (workspaceRoot: string) => Promise<LocalAgentProfile[]>;
   agentDir?: string;
   allowedRoots?: readonly string[];
+  durableWorkspaceContext?: DurableAgentWorkspaceContext;
   logger?: LocalAgentManagerLogger;
   subagents: SubagentsConfig;
 }
@@ -88,6 +92,7 @@ export class LocalAgentManager {
   private readonly loadProfiles: (workspaceRoot: string) => Promise<LocalAgentProfile[]>;
   private readonly agentDir?: string;
   private readonly allowedRoots?: readonly string[];
+  private readonly durableWorkspaceContext?: DurableAgentWorkspaceContext;
   private readonly logger?: LocalAgentManagerLogger;
   private readonly subagents: SubagentsConfig;
   private readonly activeTurns = new Map<string, Promise<void>>();
@@ -102,6 +107,7 @@ export class LocalAgentManager {
     this.loadProfiles = options.loadProfiles;
     this.agentDir = options.agentDir;
     this.allowedRoots = options.allowedRoots;
+    this.durableWorkspaceContext = options.durableWorkspaceContext;
     this.logger = options.logger;
     this.subagents = options.subagents;
   }
@@ -603,7 +609,12 @@ export class LocalAgentManager {
     const normalized = resolve(workspaceRoot);
     if (!workspaceId || !this.allowedRoots) return Result.ok(normalized);
     try {
-      return Result.ok(assertAllowedPath(normalized, [...this.allowedRoots]));
+      return Result.ok(assertLocalAgentWorkspaceAllowed(
+        normalized,
+        workspaceId,
+        this.allowedRoots,
+        this.durableWorkspaceContext,
+      ));
     } catch (cause) {
       return Result.err(new AgentScopeError({
         code: "WORKSPACE_NOT_ALLOWED",
