@@ -16,7 +16,6 @@ import {
 } from "./local-agent-errors.js";
 import {
   LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
-  LocalAgentDaemonAlreadyRunningError,
   LocalAgentDaemonLock,
   ensureLocalAgentDaemonStateDir,
   ensureLocalAgentDaemonSecret,
@@ -164,14 +163,26 @@ export class LocalAgentDaemon {
       writeLocalAgentDaemonLog(this.paths, "info", "daemon_started", { pid: process.pid });
       return this.status();
     } catch (error) {
+      this.accepting = false;
+      if (this.idleTimer) clearInterval(this.idleTimer);
+      for (const socket of this.sockets) socket.destroy();
+      this.sockets.clear();
+      await closeServer(this.server).catch(() => undefined);
       this.server = undefined;
+      this.startedAt = undefined;
       this.authToken = undefined;
       if (lockAcquired) {
-        this.lock.release();
-        this.ownsLock = false;
-        removeLocalAgentDaemonFiles(this.paths);
+        try {
+          try {
+            removeLocalAgentDaemonFiles(this.paths);
+          } finally {
+            this.ownsLock = false;
+            this.lock.release();
+          }
+        } catch {
+          // Cleanup failures must not replace the original startup failure.
+        }
       }
-      if (error instanceof LocalAgentDaemonAlreadyRunningError) throw error;
       throw error;
     }
   }
