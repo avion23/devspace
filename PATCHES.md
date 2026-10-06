@@ -154,7 +154,7 @@ instructions".
 ## Releases (`scripts/`)
 
 - `src/fork-revision.ts` holds the revision reported by the daemon
-  (`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r21`).
+  (`<package version>-<FORK_REVISION>`, e.g. `1.0.8-r22`).
 - `scripts/release.sh rN` cuts a release from a clean `main` equal to
   `origin/main`: bumps the revision in `src/fork-revision.ts`, `README.md`,
   `PATCHES.md` and `docs/local-agent-daemon.md`, runs `npm ci`, `npm test`

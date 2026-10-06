@@ -5,7 +5,7 @@ Maintained fork of [`@waishnav/devspace`](https://www.npmjs.com/package/@waishna
 ## Install
 
 ```
-scripts/deploy.sh v1.0.8-r21
+scripts/deploy.sh v1.0.8-r22
 ```
 
 `deploy.sh` clones the tag, builds it (`dist/` is not committed), installs the
