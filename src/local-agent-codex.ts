@@ -373,34 +373,17 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
       this.alive = false;
       this.rpc.fail(new Error("codex app-server closed."));
       if (!this.child.stdin.destroyed) this.child.stdin.end();
-      if (this.child.exitCode === null) {
-        terminateProcessTree(this.child, "SIGTERM", process.platform !== "win32");
-        if (!await waitForProcessExit(this.child, 1_000)) {
-          terminateProcessTree(this.child, "SIGKILL", process.platform !== "win32");
-        }
-      }
+      terminateProcessTree(this.child, "SIGTERM", process.platform !== "win32");
+      // As in process-sessions.stop, descendants may outlive the leader.
+      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+      terminateProcessTree(this.child, "SIGKILL", process.platform !== "win32");
+      // Detached groups are outside ownership but may retain our pipes.
+      this.child.stdin.destroy();
+      this.child.stdout.destroy();
+      this.child.stderr.destroy();
     })();
     return this.closePromise;
   }
-}
-
-async function waitForProcessExit(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number,
-): Promise<boolean> {
-  if (child.exitCode !== null) return true;
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.removeListener("exit", onExit);
-      resolve(false);
-    }, timeoutMs);
-    timer.unref();
-    const onExit = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
-    child.once("exit", onExit);
-  });
 }
 
 export class CodexLocalAgentDriver implements LocalAgentDriver {
@@ -575,6 +558,9 @@ class CodexAppServerRpc {
       resolveTurn = resolve;
       rejectTurn = reject;
     });
+    // Failure can reject completion while turn/start is still pending.
+    // Observe it now; awaiting the original promise below preserves the error.
+    void completion.catch(() => undefined);
     const turn: CodexTurnAccumulator = {
       threadId,
       items: [],
