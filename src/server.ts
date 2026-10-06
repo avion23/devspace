@@ -13,7 +13,7 @@ import {
   registerAppTool,
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
-import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
+import { createTwoFilesPatch, FILE_HEADERS_ONLY, parsePatch } from "diff";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
 import * as z from "zod/v4";
@@ -45,6 +45,7 @@ import {
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
+import { resolveAllowedPath } from "./roots.js";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
@@ -390,9 +391,13 @@ function countDiffStats(diff: string | undefined): DiffStats {
   let additions = 0;
   let removals = 0;
 
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+") && !line.startsWith("+++")) additions++;
-    if (line.startsWith("-") && !line.startsWith("---")) removals++;
+  for (const patch of parsePatch(diff)) {
+    for (const hunk of patch.hunks) {
+      for (const line of hunk.lines) {
+        if (line.startsWith("+")) additions++;
+        if (line.startsWith("-")) removals++;
+      }
+    }
   }
 
   return { additions, removals };
@@ -1090,7 +1095,8 @@ export function createMcpServer(
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
-      const absolutePath = workspaces.resolvePath(workspace, input.path);
+      workspaces.resolvePath(workspace, input.path);
+      const absolutePath = resolveAllowedPath(input.path, workspace.root, [workspace.root], { followFinal: true });
       let previousContent: string | null = null;
       try {
         previousContent = await readFile(absolutePath, "utf8");
