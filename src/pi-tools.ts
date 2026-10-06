@@ -1,5 +1,5 @@
 import { constants, createReadStream, statSync } from "node:fs";
-import { access, open } from "node:fs/promises";
+import { access, mkdir, open, writeFile } from "node:fs/promises";
 import { finished } from "node:stream/promises";
 import {
   createEditTool,
@@ -343,9 +343,22 @@ export async function readFileTool(input: ReadToolInput, context: ToolContext): 
   );
 }
 
-export async function writeFileTool(input: WriteToolInput, context: ToolContext): Promise<ToolResponse> {
+export async function writeFileTool(
+  input: WriteToolInput,
+  context: ToolContext,
+  beforeWrite?: (absolutePath: string) => Promise<void>,
+): Promise<ToolResponse> {
   const path = resolveAllowedPath(input.path, context.cwd, [context.root], { followFinal: true });
-  const tool = createWriteTool(context.cwd);
+  const tool = createWriteTool(context.cwd, beforeWrite ? {
+    operations: {
+      // Pi runs this hook inside the same per-file queue used by edit.
+      mkdir: async (dir) => {
+        await beforeWrite(path);
+        await mkdir(dir, { recursive: true });
+      },
+      writeFile: (absolutePath, content) => writeFile(absolutePath, content, "utf8"),
+    },
+  } : undefined);
 
   return runTool((params) => tool.execute("write_file", params), {
     path,

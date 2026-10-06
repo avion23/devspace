@@ -45,7 +45,6 @@ import {
 } from "./pi-tools.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
-import { resolveAllowedPath } from "./roots.js";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { openAiConversationScopeId } from "./request-meta.js";
@@ -416,7 +415,8 @@ function fileWritePatch(path: string, previousContent: string | null, content: s
   return [
     `diff --git a/${path} b/${path}`,
     previousContent === null ? "new file mode 100644" : undefined,
-    body.replace(/\r?\n$/, ""),
+    // Strip only the patch separator LF; a preceding CR is file content.
+    body.replace(/\n$/, ""),
   ]
     .filter((line): line is string => line !== undefined)
     .join("\n");
@@ -1096,25 +1096,18 @@ export function createMcpServer(
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       workspaces.resolvePath(workspace, input.path);
-      const absolutePath = resolveAllowedPath(input.path, workspace.root, [workspace.root], { followFinal: true });
-      let previousContent: string | null = null;
-      try {
-        previousContent = await readFile(absolutePath, "utf8");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          const content = [textBlock(error instanceof Error ? error.message : String(error))];
-          logFailedToolResponse(config, {
-            tool: toolNames.write,
-            workspaceId,
-            path: input.path,
-          }, content, startedAt);
-          return { content, isError: true };
-        }
-      }
-      const patch = fileWritePatch(input.path, previousContent, input.content);
+      let patch = "";
       const response = await writeFileTool(input, {
         cwd: workspace.root,
         root: workspace.root,
+      }, async (absolutePath) => {
+        let previousContent: string | null = null;
+        try {
+          previousContent = await readFile(absolutePath, "utf8");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        patch = fileWritePatch(input.path, previousContent, input.content);
       });
 
       if (response.isError) {
