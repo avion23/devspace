@@ -76,7 +76,7 @@ const catalog: LocalAgentCatalog = {
   providers: [
     { id: "codex", enabled: true, available: true, usable: true, model: "gpt-5.4", effort: "high" },
     {
-      id: "claude",
+      id: "codex",
       enabled: true,
       available: false,
       usable: false,

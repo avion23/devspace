@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -13,6 +13,7 @@ import {
   registerAppTool,
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
+import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import express from "express";
 import type { NextFunction, Request, Response } from "express";
 import * as z from "zod/v4";
@@ -397,27 +398,22 @@ function countDiffStats(diff: string | undefined): DiffStats {
   return { additions, removals };
 }
 
-function newFilePatch(path: string, content: string): string {
-  const lines =
-    content.length === 0
-      ? []
-      : content.endsWith("\n")
-        ? content.slice(0, -1).split("\n")
-        : content.split("\n");
-  const hunkLength = lines.length;
-  const hunkRange = hunkLength === 0 ? "+0,0" : `+1,${hunkLength}`;
-  const body = lines.map((line) => `+${line}`).join("\n");
-
+function fileWritePatch(path: string, previousContent: string | null, content: string): string {
+  const body = createTwoFilesPatch(
+    previousContent === null ? "/dev/null" : `a/${path}`,
+    `b/${path}`,
+    previousContent ?? "",
+    content,
+    "",
+    "",
+    { context: 3, headerOptions: FILE_HEADERS_ONLY },
+  );
   return [
     `diff --git a/${path} b/${path}`,
-    "new file mode 100644",
-    "index 0000000..0000000",
-    "--- /dev/null",
-    `+++ b/${path}`,
-    `@@ -0,0 ${hunkRange} @@`,
-    body,
+    previousContent === null ? "new file mode 100644" : undefined,
+    body.replace(/\r?\n$/, ""),
   ]
-    .filter((line) => line.length > 0)
+    .filter((line): line is string => line !== undefined)
     .join("\n");
 }
 
@@ -815,7 +811,7 @@ export function createMcpServer(
         skillDiagnostics: z.array(z.unknown()).optional(),
       },
       ...toolWidgetDescriptorMeta(config, "workspace"),
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: false },
     },
     async ({ path, mode, baseRef }, { _meta }) => {
       const startedAt = performance.now();
@@ -1094,7 +1090,22 @@ export function createMcpServer(
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
+      const absolutePath = workspaces.resolvePath(workspace, input.path);
+      let previousContent: string | null = null;
+      try {
+        previousContent = await readFile(absolutePath, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          const content = [textBlock(error instanceof Error ? error.message : String(error))];
+          logFailedToolResponse(config, {
+            tool: toolNames.write,
+            workspaceId,
+            path: input.path,
+          }, content, startedAt);
+          return { content, isError: true };
+        }
+      }
+      const patch = fileWritePatch(input.path, previousContent, input.content);
       const response = await writeFileTool(input, {
         cwd: workspace.root,
         root: workspace.root,
@@ -1109,7 +1120,6 @@ export function createMcpServer(
         return response;
       }
 
-      const patch = newFilePatch(input.path, input.content);
       const stats = countDiffStats(patch);
       const summary = {
         ...stats,

@@ -106,21 +106,20 @@ test("open_workspace omits providers disabled by configuration", async (t) => {
   const context = await fixture(t, {
     localAgentProviders: [
       { name: "codex", available: true },
-      { name: "claude", available: true },
     ],
     subagents: {
       enabled: true,
       providers: [
-        { id: "codex", enabled: true },
-        { id: "claude", enabled: false },
+        { id: "codex", enabled: false },
       ],
+      sandboxFallback: "fail",
     },
   });
 
   const opened = structuredContent(await callOpen(context.client, context.project, "chat-1"));
   assert.deepEqual(
     (opened.agentProviders as Array<Record<string, unknown>>).map((provider) => provider.id),
-    ["codex"],
+    [],
   );
 });
 
@@ -295,6 +294,7 @@ async function fixture(
         ...loadedConfig,
         subagents: options.subagents ?? {
           enabled: true,
+          sandboxFallback: loadedConfig.subagents.sandboxFallback,
           providers: initialProviderAvailability.map((provider) => ({
             id: provider.name,
             enabled: true,
