@@ -15,8 +15,8 @@ git fetch -q origin
 [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || { echo "main differs from origin/main" >&2; exit 1; }
 git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null && { echo "tag $tag already exists" >&2; exit 1; }
 
-old=$(sed -n 's/^export const FORK_REVISION = "\(.*\)";$/\1/p' dist/fork-revision.js)
-sed -i "s/\"$old\"/\"$rev\"/" dist/fork-revision.js
+old=$(sed -n 's/^export const FORK_REVISION = "\(.*\)";$/\1/p' src/fork-revision.ts)
+sed -i "s/\"$old\"/\"$rev\"/" src/fork-revision.ts
 sed -i "s/$version-$old/$version-$rev/g" README.md PATCHES.md docs/local-agent-daemon.md
 
 npm ci --no-audit --no-fund
