@@ -45,9 +45,19 @@ invariants remain exceptions; cleanup and shutdown also stay best-effort so a
 secondary release failure cannot replace the primary agent failure.
 
 The daemon state directory contains the socket or pipe identity, an atomic
-lock, a PID marker, and diagnostic logs. A second client cannot start another
-daemon for the same state directory. Stale lock and socket files are recovered
-only after the recorded PID is no longer alive.
+lock, a PID marker, and diagnostic logs. An exclusive SQLite transaction on
+`agentd.lock.sqlite` serializes lock publication, stale recovery, and release
+for the daemon's entire lifetime; the operating system releases it on process
+exit, including a crash. A second client cannot start another daemon for the
+same state directory. Stale lock and socket files are recovered only after the
+recorded PID is no longer alive. Undecodable lock records are not removed
+automatically.
+
+`agentd.lock.sqlite` is a stable coordination file, not a stale PID marker:
+never delete or replace it while a daemon or startup contender may be using
+the state directory. All daemon startups sharing a state directory must use
+this locking implementation; stop older daemons and pending startups before
+upgrading.
 
 The daemon is started on demand and may exit after its active turns, clients,
 and warm runtime idle periods have ended. Users do not need to manage it during

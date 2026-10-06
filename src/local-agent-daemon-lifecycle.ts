@@ -6,11 +6,11 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 
 export const LOCAL_AGENT_DAEMON_PROTOCOL_VERSION = 4;
 export const LOCAL_AGENT_DAEMON_SOCKET_NAME = "agentd.sock";
@@ -63,12 +63,33 @@ export class LocalAgentDaemonAlreadyRunningError extends Error {
 }
 
 export class LocalAgentDaemonLock {
-  private acquired = false;
+  private ownership?: Database.Database;
 
   constructor(readonly paths: LocalAgentDaemonPaths) {}
 
   acquire(): void {
+    if (this.ownership) throw new LocalAgentDaemonAlreadyRunningError(process.pid);
     ensureLocalAgentDaemonStateDir(this.paths.stateDir);
+    // Keep this database at a stable pathname: SQLite's OS lock serializes all
+    // ownership changes and is released even if the owning process crashes.
+    const ownershipPath = `${this.paths.lockPath}.sqlite`;
+    const ownership = new Database(ownershipPath, { timeout: 0 });
+    try {
+      chmodSync(ownershipPath, 0o600);
+      ownership.exec("BEGIN EXCLUSIVE");
+      this.publish();
+      this.ownership = ownership;
+    } catch (error) {
+      if ((error as { code?: string }).code === "SQLITE_BUSY") {
+        throw new LocalAgentDaemonAlreadyRunningError(readDaemonPid(this.paths.lockPath));
+      }
+      throw error;
+    } finally {
+      if (this.ownership !== ownership) ownership.close();
+    }
+  }
+
+  private publish(): void {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const temporaryPath = `${this.paths.lockPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
       let published = false;
@@ -81,7 +102,6 @@ export class LocalAgentDaemonLock {
         rmSync(temporaryPath, { force: true });
         chmodSync(this.paths.lockPath, 0o600);
         writeFileSecure(this.paths.pidPath, `${process.pid}\n`);
-        this.acquired = true;
         return;
       } catch (error) {
         rmSync(temporaryPath, { force: true });
@@ -98,20 +118,27 @@ export class LocalAgentDaemonLock {
           // publishing its owner record. Refuse to delete it automatically.
           throw new LocalAgentDaemonAlreadyRunningError();
         }
-        if (!removeStaleLock(this.paths.lockPath)) continue;
+        // The exclusive transaction is still held, so no contender can replace
+        // this dead owner's record between the read and removal.
+        rmSync(this.paths.lockPath, { force: true });
       }
     }
     throw new LocalAgentDaemonAlreadyRunningError(readDaemonPid(this.paths.lockPath));
   }
 
   release(): void {
-    if (!this.acquired) return;
-    this.acquired = false;
-    if (readDaemonPid(this.paths.pidPath) === process.pid) {
-      rmSync(this.paths.pidPath, { force: true });
-    }
-    if (readDaemonPid(this.paths.lockPath) === process.pid) {
-      rmSync(this.paths.lockPath, { force: true });
+    const ownership = this.ownership;
+    if (!ownership) return;
+    this.ownership = undefined;
+    try {
+      if (readDaemonPid(this.paths.pidPath) === process.pid) {
+        rmSync(this.paths.pidPath, { force: true });
+      }
+      if (readDaemonPid(this.paths.lockPath) === process.pid) {
+        rmSync(this.paths.lockPath, { force: true });
+      }
+    } finally {
+      ownership.close();
     }
   }
 }
@@ -193,21 +220,6 @@ function writeFileSecure(path: string, content: string): void {
 
 function isFileExistsError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "EEXIST";
-}
-
-function removeStaleLock(path: string): boolean {
-  const stalePath = `${path}.stale-${process.pid}-${randomBytes(8).toString("hex")}`;
-  try {
-    // Rename moves the exact lock we inspected out of the ownership path. If
-    // another contender publishes a new lock after this point, it is never
-    // removed with the stale one.
-    renameSync(path, stalePath);
-    rmSync(stalePath, { force: true });
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
 }
 
 function isDaemonSecret(secret: string): boolean {
