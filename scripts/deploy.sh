@@ -17,7 +17,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 git clone -q --depth 1 --branch "$tag" "$repo_url.git" "$work/src"
 (cd "$work/src" && npm ci --ignore-scripts --no-audit --no-fund)
-tarball=$(cd "$work/src" && npm pack --silent --pack-destination "$work")
+tarball=$(cd "$work/src" && npm pack --silent --pack-destination "$work" | tail -1)
 npm i -g --no-audit --no-fund "$work/$tarball"
 pkg="$(npm root -g)/@waishnav/devspace"
 installed=$(sed -n 's/^export const FORK_REVISION = "\(.*\)";$/\1/p' "$pkg/dist/fork-revision.js")

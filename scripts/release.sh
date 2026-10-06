@@ -24,7 +24,7 @@ npm test
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-tarball=$(npm pack --silent --pack-destination "$work")
+tarball=$(npm pack --silent --pack-destination "$work" | tail -1)
 npm i -g --no-audit --no-fund --prefix "$work/prefix" "$work/$tarball"
 node scripts/smoke.mjs "$work/prefix/lib/node_modules/@waishnav/devspace"
 
