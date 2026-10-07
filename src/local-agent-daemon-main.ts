@@ -4,7 +4,7 @@ import { loadConfig } from "./config.js";
 import { createLocalAgentDrivers } from "./local-agent-adapters.js";
 import { getLinuxSandboxProbeState } from "./local-agent-codex.js";
 import { loadLocalAgentProfiles } from "./local-agent-profiles.js";
-import { LocalAgentDaemon, writeLocalAgentDaemonLog } from "./local-agent-daemon.js";
+import { LocalAgentDaemon, writeLocalAgentDaemonLog, type LocalAgentDaemonStopReason } from "./local-agent-daemon.js";
 import {
   LocalAgentDaemonAlreadyRunningError,
   localAgentDaemonPaths,
@@ -61,7 +61,7 @@ const daemon = new LocalAgentDaemon({
 });
 
 let shuttingDown = false;
-const shutdown = () => {
+const shutdown = (reason: LocalAgentDaemonStopReason) => {
   if (shuttingDown) return;
   shuttingDown = true;
   const forceTimer = setTimeout(() => {
@@ -74,10 +74,24 @@ const shutdown = () => {
     process.exit(1);
   }, parseShutdownTimeoutMs(process.env.DEVSPACE_AGENTD_SHUTDOWN_TIMEOUT_MS));
   forceTimer.unref();
-  void daemon.close().finally(() => process.exit(0));
+  void daemon.close(reason).finally(() => process.exit(0));
 };
-process.once("SIGINT", shutdown);
-process.once("SIGTERM", shutdown);
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+
+// The daemon is spawned with stdio ignored, so a fatal error that Node prints
+// to stderr is lost. Record it before exiting; active runs stay durable and
+// are reconciled by the next daemon start.
+const exitOnFatal = (event: "uncaught_exception" | "unhandled_rejection") => (error: unknown) => {
+  log("error", `daemon_${event}`, {
+    error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+    activeTurns: manager.activeTurnCount,
+    runtimeCount: manager.runtimeCount,
+  });
+  process.exit(1);
+};
+process.once("uncaughtException", exitOnFatal("uncaught_exception"));
+process.once("unhandledRejection", exitOnFatal("unhandled_rejection"));
 
 try {
   await daemon.start();

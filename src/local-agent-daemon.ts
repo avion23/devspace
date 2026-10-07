@@ -46,6 +46,8 @@ import type {
 import type { LocalAgentRecord, LocalAgentWorkspaceScope } from "./local-agent-store.js";
 
 const MAX_REQUEST_BYTES = 512 * 1024;
+export type LocalAgentDaemonStopReason = "idle_timeout" | "stop_requested" | "SIGINT" | "SIGTERM";
+
 const DEFAULT_DAEMON_IDLE_SHUTDOWN_MS = 30_000;
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 1_000;
 const DEFAULT_REQUEST_READ_TIMEOUT_MS = 5_000;
@@ -204,7 +206,7 @@ export class LocalAgentDaemon {
     };
   }
 
-  async close(): Promise<void> {
+  async close(reason: LocalAgentDaemonStopReason): Promise<void> {
     if (this.closePromise) return this.closePromise;
     if (!this.ownsLock && !this.server) return;
     if (this.accepting) this.manager.stopAdmission?.();
@@ -213,6 +215,7 @@ export class LocalAgentDaemon {
     if (this.idleTimer) clearInterval(this.idleTimer);
     this.closePromise = (async () => {
       writeLocalAgentDaemonLog(this.paths, "info", "daemon_stopping", {
+        reason,
         activeTurns: this.manager.activeTurnCount,
         runtimeCount: this.manager.runtimeCount,
       });
@@ -302,7 +305,7 @@ export class LocalAgentDaemon {
         ok: true,
         result: response,
       }));
-      if (request.method === "daemon.stop") setImmediate(() => { void this.close(); });
+      if (request.method === "daemon.stop") setImmediate(() => { void this.close("stop_requested"); });
     } catch (error) {
       this.writeError(socket, requestId, daemonErrorPayload(error));
     }
@@ -386,7 +389,7 @@ export class LocalAgentDaemon {
     }
     const now = this.now();
     this.idleSince ??= now;
-    if (now - this.idleSince >= this.idleShutdownMs) await this.close();
+    if (now - this.idleSince >= this.idleShutdownMs) await this.close("idle_timeout");
   }
 }
 
