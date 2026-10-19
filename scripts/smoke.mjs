@@ -53,7 +53,10 @@ function startServer(base, repo, port) {
 }
 
 async function waitListening(server) {
-    for (let i = 0; i < 100 && !server.log.includes("listening") && !server.exit; i++)
+    // A cold dist start is a few seconds on a fast box and can pass 15s on a
+    // loaded one, so poll on wall-clock time rather than a fixed poll count.
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline && !server.log.includes("listening") && !server.exit)
         await sleep(100);
     return server.log.includes("listening");
 }
@@ -116,26 +119,37 @@ async function checkTools(server, repo) {
         ok(seconds <= 31 && long.structuredContent?.running === true, `exec_command yields in ${seconds.toFixed(1)}s with running=true`);
         checkResultText(long, "exec_command");
         let final;
+        let polledText = "";
         for (let polls = 1; ; polls++) {
             const poll = await first.callTool({ name: "write_stdin", arguments: { workspaceId, sessionId: long.structuredContent.sessionId } }, undefined, { timeout: 120_000 });
+            polledText += text(poll);
             if (poll.structuredContent?.running)
                 continue;
             final = poll;
-            ok(text(final).includes("done") && final.structuredContent.exitCode === 0, `write_stdin polls to exit 0 (${polls} polls)`);
+            // write() drains the buffer on every poll, so a process that emits its last
+            // line just before exit hands it to the poll that still reported running=true;
+            // the exit poll then carries only the status line. Judge the whole sequence.
+            ok(polledText.includes("done") && final.structuredContent.exitCode === 0, `write_stdin polls to exit 0 (${polls} polls)`);
             checkResultText(final, "write_stdin");
             break;
         }
 
         const big = await first.callTool({ name: "exec_command", arguments: { workspaceId, cmd: "seq 1 1000000" } }, undefined, { timeout: 120_000 });
         let bigText = text(big);
+        let maxResponseChars = bigText.length;
         let state = big.structuredContent;
         while (state?.running) {
             const poll = await first.callTool({ name: "write_stdin", arguments: { workspaceId, sessionId: state.sessionId } }, undefined, { timeout: 120_000 });
-            bigText += text(poll);
+            const polled = text(poll);
+            bigText += polled;
+            maxResponseChars = Math.max(maxResponseChars, polled.length);
             state = poll.structuredContent;
         }
         const logPath = bigText.match(/logged at (\S+)/)?.[1];
-        ok(bigText.length < 20_000, `large output bounded to ${bigText.length} chars`);
+        // The bound is per response: consume() drains at most max(256, DEFAULT_MAX_OUTPUT_TOKENS * 4)
+        // characters plus the truncation marker, so how many polls a 6.9 MB run takes is a
+        // scheduling race. Summing the polls measured that race, not the bound.
+        ok(maxResponseChars < 20_000, `large output bounded to ${maxResponseChars} chars per response`);
         ok(Boolean(logPath) && existsSync(logPath) && readFileSync(logPath, "utf8").trim().split("\n").length === 1_000_000, `full output kept in ${logPath}`);
         ok(bigText.includes("1000000"), "tail of large output present");
         return { token, workspaceId };

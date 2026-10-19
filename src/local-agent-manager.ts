@@ -37,7 +37,7 @@ import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import {
   assertLocalAgentWorkspaceAllowed,
   type DurableAgentWorkspaceContext,
-} from "./cli-workspace.js";
+} from "./roots.js";
 import {
   isSubagentProviderEnabled,
   type SubagentsConfig,

@@ -71,10 +71,13 @@ assert.equal(
   "agt_test failed PROVIDER_EXECUTION_ERROR: Provider disconnected. [retryable]",
 );
 
-const catalog: LocalAgentCatalog = {
+// A real catalog holds at most one status per provider id
+// (buildLocalAgentProviderStatuses maps LOCAL_AGENT_PROVIDERS one-to-one), so
+// unavailable-provider omission is tested with a catalog whose only codex
+// entry is unavailable — not with duplicate ids.
+const unavailableCatalog: LocalAgentCatalog = {
   enabled: true,
   providers: [
-    { id: "codex", enabled: true, available: true, usable: true, model: "gpt-5.4", effort: "high" },
     {
       id: "codex",
       enabled: true,
@@ -82,6 +85,37 @@ const catalog: LocalAgentCatalog = {
       usable: false,
       reason: "credentials missing",
     },
+  ],
+  profiles: [{
+    name: "reviewer",
+    description: "Review changes.",
+    provider: "codex",
+    model: "gpt-5.4",
+    effort: "high",
+  }],
+};
+const unavailableTargets = presentAgentTargetCatalog(unavailableCatalog);
+assert.deepEqual(unavailableTargets, {
+  targets: [
+    {
+      name: "reviewer",
+      kind: "profile",
+      provider: "codex",
+      description: "Review changes.",
+      model: "gpt-5.4",
+      effort: "high",
+    },
+  ],
+});
+assert.equal(
+  formatAgentTargetCatalog(unavailableTargets),
+  "reviewer [profile, codex] model=gpt-5.4 effort=high - Review changes.",
+);
+
+const catalog: LocalAgentCatalog = {
+  enabled: true,
+  providers: [
+    { id: "codex", enabled: true, available: true, usable: true, model: "gpt-5.4", effort: "high" },
   ],
   profiles: [{
     name: "reviewer",

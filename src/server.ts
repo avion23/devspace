@@ -403,6 +403,9 @@ function countDiffStats(diff: string | undefined): DiffStats {
 }
 
 function fileWritePatch(path: string, previousContent: string | null, content: string): string {
+  // A headers-only patch is not applicable, including for a new empty file.
+  if ((previousContent ?? "") === content) return "";
+
   const body = createTwoFilesPatch(
     previousContent === null ? "/dev/null" : `a/${path}`,
     `b/${path}`,
@@ -1096,7 +1099,7 @@ export function createMcpServer(
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       workspaces.resolvePath(workspace, input.path);
-      let patch = "";
+      let patch: string | null = null;
       const response = await writeFileTool(input, {
         cwd: workspace.root,
         root: workspace.root,
@@ -1117,6 +1120,22 @@ export function createMcpServer(
           path: input.path,
         }, response.content, startedAt);
         return response;
+      }
+
+      // @earendil-works/pi-coding-agent@0.80.3
+      // (node_modules/@earendil-works/pi-coding-agent/dist/core/tools/write.js):
+      // execute() always awaits ops.mkdir(dir) inside withFileMutationQueue(...)
+      // before ops.writeFile(...). Our beforeWrite hook is wired as operations.mkdir,
+      // so if it never ran, writeFile never ran either: null on success is unreachable
+      // while that contract holds. Empty string instead means a computed no-change patch.
+      if (patch === null) {
+        const content = [textBlock("Write-tool contract violated: successful write without running the beforeWrite hook.")];
+        logFailedToolResponse(config, {
+          tool: toolNames.write,
+          workspaceId,
+          path: input.path,
+        }, content, startedAt);
+        return { content, isError: true };
       }
 
       const stats = countDiffStats(patch);

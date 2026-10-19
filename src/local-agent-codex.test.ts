@@ -94,7 +94,11 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 `, { mode: 0o700 });
   await chmod(command, 0o700);
 
-  const runtime = new CodexAppServerRuntime({ command, env: process.env });
+  // This is a provider-protocol test, not a sandbox test. Without an injected
+  // probe, run() resolves the real host capability (unshare -Ur true), which
+  // fails on runners that restrict user namespaces (ubuntu-24.04 images) and
+  // made this test depend on the machine instead of the protocol.
+  const runtime = new CodexAppServerRuntime({ command, env: process.env, sandboxProbe: async () => true });
   try {
     await runtime.initialize();
     let callbackSessionId: string | undefined;

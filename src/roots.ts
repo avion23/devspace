@@ -1,6 +1,7 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import type { WorkspaceStore } from "./workspace-store.js";
 
 export class AccessDeniedError extends Error {
   constructor(message: string) {
@@ -39,6 +40,41 @@ export function assertAllowedPath(path: string, allowedRoots: string[]): string 
   }
 
   throw new AccessDeniedError(`Path is outside allowed roots: ${path}`);
+}
+
+export interface DurableAgentWorkspaceContext {
+  worktreeRoot: string;
+  workspaceStore: Pick<WorkspaceStore, "getSession">;
+}
+
+/** Checkout authority is unchanged; worktrees require their durable admission. */
+export function assertLocalAgentWorkspaceAllowed(
+  workspaceRoot: string,
+  workspaceId: string,
+  allowedRoots: readonly string[],
+  durableContext?: DurableAgentWorkspaceContext,
+): string {
+  try {
+    return assertAllowedPath(workspaceRoot, [...allowedRoots]);
+  } catch (cause) {
+    if (!durableContext) throw cause;
+    const session = durableContext.workspaceStore.getSession(workspaceId);
+    if (!session || session.id !== workspaceId || session.mode !== "worktree" || !session.managed ||
+        !session.sourceRoot || canonicalizePath(session.root) !== canonicalizePath(workspaceRoot)) {
+      throw cause;
+    }
+    assertAllowedPath(canonicalizePath(session.sourceRoot), allowedRoots.map(canonicalizePath));
+    assertAllowedPath(canonicalizePath(workspaceRoot), [canonicalizePath(durableContext.worktreeRoot)]);
+    return resolve(workspaceRoot);
+  }
+}
+
+export function canonicalizePath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function realpathOfClosestExistingAncestor(absolutePath: string): { realParent: string; missingSuffix: string[] } {

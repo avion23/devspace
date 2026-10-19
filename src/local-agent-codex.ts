@@ -370,17 +370,26 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closePromise = (async () => {
-      this.alive = false;
-      this.rpc.fail(new Error("codex app-server closed."));
-      if (!this.child.stdin.destroyed) this.child.stdin.end();
-      terminateProcessTree(this.child, "SIGTERM", process.platform !== "win32");
-      // As in process-sessions.stop, descendants may outlive the leader.
-      await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-      terminateProcessTree(this.child, "SIGKILL", process.platform !== "win32");
-      // Detached groups are outside ownership but may retain our pipes.
-      this.child.stdin.destroy();
-      this.child.stdout.destroy();
-      this.child.stderr.destroy();
+      const childIsRunning = () => this.child.exitCode === null && this.child.signalCode === null;
+      try {
+        this.alive = false;
+        this.rpc.fail(new Error("codex app-server closed."));
+        if (!this.child.stdin.destroyed) this.child.stdin.end();
+        if (childIsRunning()) {
+          terminateProcessTree(this.child, "SIGTERM", process.platform !== "win32");
+        }
+        if (childIsRunning()) {
+          await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+        }
+        if (childIsRunning()) {
+          terminateProcessTree(this.child, "SIGKILL", process.platform !== "win32");
+        }
+      } finally {
+        // Descendants may retain our pipes after the leader exits.
+        this.child.stdin.destroy();
+        this.child.stdout.destroy();
+        this.child.stderr.destroy();
+      }
     })();
     return this.closePromise;
   }
